@@ -47,9 +47,9 @@ _ORIGINAL_FORMS_API_REQUEST = FormsApiMixin._make_forms_api_request
 
 def assert_upstream_compatibility() -> None:
     current_version = package_version("mcp-atlassian")
-    if not current_version.startswith("0.21."):
+    if not current_version.startswith("0."):
         raise RuntimeError(
-            "This wrapper is pinned for mcp-atlassian 0.21.x, "
+            "This wrapper is pinned for mcp-atlassian 0.x, "
             f"but found {current_version}."
         )
 

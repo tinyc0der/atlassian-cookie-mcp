@@ -51,13 +51,13 @@ jobs:
 
             CURRENT="${{ steps.current.outputs.version }}"
             LATEST="${{ steps.upstream.outputs.version }}"
-            CURRENT_MINOR="${CURRENT%.*}"
-            LATEST_MINOR="${LATEST%.*}"
+            CURRENT_MAJOR="${CURRENT%%.*}"
+            LATEST_MAJOR="${LATEST%%.*}"
 
-            if [ "$CURRENT_MINOR" = "$LATEST_MINOR" ]; then
-              echo "bump=patch" >> "$GITHUB_OUTPUT"
+            if [ "$CURRENT_MAJOR" != "$LATEST_MAJOR" ]; then
+              echo "bump=major" >> "$GITHUB_OUTPUT"
             else
-              echo "bump=minor-or-major" >> "$GITHUB_OUTPUT"
+              echo "bump=minor-or-patch" >> "$GITHUB_OUTPUT"
             fi
             echo "New version available: $CURRENT -> $LATEST ($(cat "$GITHUB_OUTPUT" | grep bump | cut -d= -f2))"
           fi
@@ -156,10 +156,10 @@ jobs:
           fi
 
           BUMP_TYPE="${{ steps.compare.outputs.bump }}"
-          if [ "$BUMP_TYPE" = "patch" ]; then
-            PRIORITY="Dependabot should handle this automatically."
+          if [ "$BUMP_TYPE" = "minor-or-patch" ]; then
+            PRIORITY="Within \`>=0.21.1,<1.0.0\` range — Dependabot should handle this automatically."
           else
-            PRIORITY="Manual update required — outside \`~=0.21.x\` pin range."
+            PRIORITY="**Major version change** — outside \`>=0.21.1,<1.0.0\` pin range. Manual update required."
           fi
 
           gh issue create \
@@ -195,7 +195,7 @@ jobs:
 
           - [ ] Review upstream changelog for relevant changes
           - [ ] Update version pin in \`pyproject.toml\`
-          - [ ] Update \`assert_upstream_compatibility()\` version prefix if minor changed
+          - [ ] Update \`assert_upstream_compatibility()\` version prefix if major changed
           - [ ] Update monkey-patches if signatures changed
           - [ ] Test locally
           - [ ] Update README badge (\`wraps-mcp--atlassian\` version)
