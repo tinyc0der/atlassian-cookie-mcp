@@ -18,7 +18,7 @@ jobs:
       - name: Get current pin
         id: current
         run: |
-          PIN=$(grep 'mcp-atlassian' pyproject.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          PIN=$(grep 'mcp-atlassian' pyproject.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
           echo "version=$PIN" >> "$GITHUB_OUTPUT"
           echo "Current pin: $PIN"
 
