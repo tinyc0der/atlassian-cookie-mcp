@@ -15,10 +15,10 @@ from requests.exceptions import HTTPError
 
 from atlassian_browser_auth import (
     BrowserAuthConfig,
-    _url_matches_base,
     browser_auth_enabled,
     create_browser_session,
     interactive_login,
+    url_matches_base,
 )
 
 # Make the upstream server expose its complete tool surface.
@@ -48,6 +48,7 @@ _ORIGINAL_FORMS_API_REQUEST = FormsApiMixin._make_forms_api_request
 
 
 def assert_upstream_compatibility() -> None:
+    """Verify mcp-atlassian version and patched method signatures are compatible."""
     current_version = package_version("mcp-atlassian")
     if not current_version.startswith("0."):
         raise RuntimeError(
@@ -83,6 +84,7 @@ def _apply_network_config(
     config: Any,
     service_name: str,
 ) -> None:
+    """Apply SSL, proxy, and no_proxy settings from config to the session."""
     configure_ssl_verification(
         service_name=service_name,
         url=config.url,
@@ -115,6 +117,7 @@ def _apply_network_config(
 
 
 def _patch_jira_client_init(self: JiraClient, config: Any | None = None) -> None:
+    """Replacement __init__ for JiraClient that injects a browser-cookie session."""
     if not browser_auth_enabled():
         _ORIGINAL_JIRA_INIT(self, config)
         return
@@ -147,6 +150,7 @@ def _patch_jira_client_init(self: JiraClient, config: Any | None = None) -> None
 def _patch_confluence_client_init(
     self: ConfluenceClient, config: Any | None = None
 ) -> None:
+    """Replacement __init__ for ConfluenceClient that injects a browser-cookie session."""
     if not browser_auth_enabled():
         _ORIGINAL_CONFLUENCE_INIT(self, config)
         return
@@ -174,6 +178,7 @@ def _patch_confluence_client_init(
 
 
 def _patch_lookup_user_by_permissions(self: UsersMixin, username: str) -> str | None:
+    """Look up a user's account ID or name via the permissions search API."""
     if not browser_auth_enabled():
         return _ORIGINAL_LOOKUP_USER_BY_PERMISSIONS(self, username)
 
@@ -206,6 +211,7 @@ def _patch_forms_api_request(
     endpoint: str,
     data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Make a Forms API request using the browser-cookie session."""
     if not browser_auth_enabled():
         return _ORIGINAL_FORMS_API_REQUEST(self, method, endpoint, data)
 
@@ -263,12 +269,13 @@ def atlassian_login(
     if url:
         cfg = BrowserAuthConfig.from_env()
         allowed_base = cfg.jira_url if target == "jira" else cfg.confluence_url
-        if not _url_matches_base(url, allowed_base):
+        if not url_matches_base(url, allowed_base):
             return {"status": "error", "message": f"URL must be under {allowed_base}"}
     return interactive_login(target, url)
 
 
 def main() -> None:
+    """Validate environment, check upstream compatibility, and start the MCP server."""
     if not os.environ.get("JIRA_URL"):
         raise RuntimeError("JIRA_URL environment variable is required")
     if not os.environ.get("CONFLUENCE_URL"):
