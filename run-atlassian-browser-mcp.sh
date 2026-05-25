@@ -26,7 +26,8 @@ then
   uv pip install --python "${PYTHON_BIN}" -e "${ROOT_DIR}"
 fi
 
-"${PYTHON_BIN}" -m playwright install chromium >/dev/null
+"${PYTHON_BIN}" -m playwright install --list 2>/dev/null | grep -q "chromium" \
+  || "${PYTHON_BIN}" -m playwright install chromium >/dev/null
 
 # Startup compatibility assertion: verify the upstream version and patched signatures
 "${PYTHON_BIN}" - <<'PY'
