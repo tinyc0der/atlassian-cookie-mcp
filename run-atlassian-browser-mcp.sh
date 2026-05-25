@@ -26,7 +26,8 @@ then
   uv pip install --python "${PYTHON_BIN}" -e "${ROOT_DIR}"
 fi
 
-"${PYTHON_BIN}" -m playwright install chromium >/dev/null
+"${PYTHON_BIN}" -c "from playwright._impl._driver import compute_driver_executable; import os, sys; sys.exit(0 if os.path.exists(compute_driver_executable()) else 1)" 2>/dev/null \
+  || "${PYTHON_BIN}" -m playwright install chromium >/dev/null
 
 # Startup compatibility assertion: verify the upstream version and patched signatures
 "${PYTHON_BIN}" - <<'PY'

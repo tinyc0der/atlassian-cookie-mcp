@@ -14,6 +14,8 @@ from atlassian import Confluence, Jira
 from requests.exceptions import HTTPError
 
 from atlassian_browser_auth import (
+    BrowserAuthConfig,
+    _url_matches_base,
     browser_auth_enabled,
     create_browser_session,
     interactive_login,
@@ -231,8 +233,12 @@ def _patch_forms_api_request(
         return json_response
     except HTTPError as exc:
         logger.error(
-            "HTTP error in Forms API (browser auth): %s - Response: %s",
+            "HTTP error in Forms API (browser auth): %s (status=%s)",
             exc,
+            exc.response.status_code if exc.response is not None else "N/A",
+        )
+        logger.debug(
+            "Forms API error response body: %s",
             exc.response.text[:500] if exc.response is not None else "",
         )
         raise handle_forms_http_error(exc, "Forms API request", endpoint) from exc
@@ -254,6 +260,11 @@ def atlassian_login(
 ) -> dict[str, Any]:
     """Launch a visible browser and wait for manual SSO / MFA login."""
 
+    if url:
+        cfg = BrowserAuthConfig.from_env()
+        allowed_base = cfg.jira_url if target == "jira" else cfg.confluence_url
+        if not _url_matches_base(url, allowed_base):
+            return {"status": "error", "message": f"URL must be under {allowed_base}"}
     return interactive_login(target, url)
 
 

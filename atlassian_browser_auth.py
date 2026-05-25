@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import threading
@@ -11,10 +12,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import requests
 from playwright.sync_api import Error, TimeoutError, sync_playwright
+
+logger = logging.getLogger("atlassian-browser-auth")
 
 ServiceName = Literal["jira", "confluence"]
 
@@ -152,8 +155,9 @@ def interactive_login(
     config: BrowserAuthConfig | None = None,
 ) -> dict[str, Any]:
     cfg = config or BrowserAuthConfig.from_env()
-    cfg.profile_dir.mkdir(parents=True, exist_ok=True)
-    cfg.storage_state.parent.mkdir(parents=True, exist_ok=True)
+    cfg.profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cfg.profile_dir.chmod(0o700)
+    cfg.storage_state.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     target_url = url or cfg.login_target(service)
 
     with _LOGIN_LOCK:
@@ -185,16 +189,26 @@ def interactive_login(
             while time.time() < deadline:
                 current_url = page.url
                 if current_url != last_url:
+                    parsed = urlparse(current_url)
+                    safe_url = urlunparse(parsed._replace(query="", fragment=""))
                     print(
-                        f"[atlassian-browser-auth] Browser now at: {current_url}",
+                        f"[atlassian-browser-auth] Browser now at: {safe_url}",
                         file=sys.stderr,
                         flush=True,
                     )
                     last_url = current_url
 
-                if current_url.startswith((cfg.jira_url, cfg.confluence_url)):
+                if _url_matches_base(current_url, cfg.jira_url) or _url_matches_base(
+                    current_url, cfg.confluence_url
+                ):
                     context.storage_state(path=str(cfg.storage_state))
+                    cfg.storage_state.chmod(0o600)
                     context.close()
+                    print(
+                        f"[atlassian-browser-auth] Login successful for {service}. Cookies saved.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                     return {
                         "status": "ok",
                         "service": service,
@@ -205,9 +219,11 @@ def interactive_login(
 
             current_url = page.url
             context.close()
+            parsed = urlparse(current_url)
+            safe_url = urlunparse(parsed._replace(query="", fragment=""))
             raise RuntimeError(
                 "Timed out waiting for Atlassian login to complete. "
-                f"Last page: {current_url}"
+                f"Last page: {safe_url}"
             )
 
 
@@ -220,10 +236,28 @@ def _load_storage_state(path: Path) -> dict[str, Any]:
         ) from exc
 
 
+def _default_port(parsed) -> int:
+    if parsed.port:
+        return parsed.port
+    return 443 if parsed.scheme == "https" else 80
+
+
+def _url_matches_base(current_url: str, base_url: str) -> bool:
+    current = urlparse(current_url)
+    base = urlparse(base_url)
+    return (
+        current.scheme == base.scheme
+        and current.hostname == base.hostname
+        and _default_port(current) == _default_port(base)
+    )
+
+
 def _cookie_matches_base_url(cookie: dict[str, Any], base_url: str) -> bool:
     hostname = urlparse(base_url).hostname or ""
     domain = (cookie.get("domain") or "").lstrip(".")
-    return bool(domain) and (hostname == domain or hostname.endswith(f".{domain}"))
+    if not domain or domain.count(".") < 1:
+        return False
+    return hostname == domain or hostname.endswith(f".{domain}")
 
 
 def _apply_storage_state_cookies(
@@ -232,8 +266,12 @@ def _apply_storage_state_cookies(
     base_url: str,
 ) -> None:
     session.cookies.clear()
+    now = time.time()
     for cookie in storage_state.get("cookies", []):
         if not _cookie_matches_base_url(cookie, base_url):
+            continue
+        expires = cookie.get("expires")
+        if expires and expires not in (-1, 0) and float(expires) < now:
             continue
         rest: dict[str, Any] = {}
         if cookie.get("httpOnly") is not None:
@@ -275,7 +313,11 @@ def _load_sso_markers() -> tuple[str, ...]:
 def looks_like_sso_response(response: requests.Response) -> bool:
     final_url = response.url or ""
     content_type = response.headers.get("Content-Type", "")
-    body_sample = response.text[:2000] if "text/" in content_type else ""
+    body_sample = (
+        response.content[:2000].decode(errors="ignore")
+        if "text/" in content_type
+        else ""
+    )
     markers = _load_sso_markers()
     url_markers = [m for m in markers if "/" in m or "." in m]
     if any(marker in final_url for marker in url_markers):
@@ -305,17 +347,24 @@ class BrowserCookieSession(requests.Session):
         self.headers.update({"User-Agent": self.browser_config.user_agent})
         try:
             self.refresh_cookies()
-        except Exception:
+        except Exception as exc:
+            logger.debug("Cookie loading failed for %s", service, exc_info=True)
             print(
-                f"[atlassian-browser-auth] Could not load browser cookies for {service}; "
-                "session will start without authentication",
+                f"[atlassian-browser-auth] Could not load browser cookies for {service}: {exc}. "
+                "Run atlassian_login tool to authenticate.",
                 file=sys.stderr,
                 flush=True,
             )
 
     def refresh_cookies(self) -> None:
         if not self.browser_config.storage_state.exists():
-            if not sys.stdin.isatty() and not os.environ.get("DISPLAY"):
+            if not sys.stdin.isatty() and not os.environ.get("DISPLAY") and sys.platform != "darwin":
+                print(
+                    "[atlassian-browser-auth] WARNING: No display available (headless environment). "
+                    "Run atlassian_login tool manually or set ATLASSIAN_BROWSER_AUTH_ENABLED=false for token auth.",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 return
             interactive_login(self.service, config=self.browser_config)
         if not self.browser_config.storage_state.exists():
@@ -328,8 +377,14 @@ class BrowserCookieSession(requests.Session):
         response = super().request(method, url, *args, **kwargs)
         if retry_on_auth and looks_like_sso_response(response):
             response.close()
-            interactive_login(self.service, config=self.browser_config)
-            self.refresh_cookies()
+            with _LOGIN_LOCK:
+                self.refresh_cookies()
+                retest = super().request(method, url, *args, **kwargs)
+                if not looks_like_sso_response(retest):
+                    return retest
+                retest.close()
+                interactive_login(self.service, config=self.browser_config)
+                self.refresh_cookies()
             return self.request(
                 method,
                 url,
