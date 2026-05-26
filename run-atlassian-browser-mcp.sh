@@ -17,7 +17,7 @@ fi
 
 if ! "${PYTHON_BIN}" - <<'PY' >/dev/null 2>&1
 from importlib.metadata import version
-assert version("atlassian-browser-mcp") == "1.0.1"
+assert version("atlassian-browser-mcp") == "1.0.2"
 import mcp_atlassian
 import playwright
 import requests

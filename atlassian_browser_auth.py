@@ -255,9 +255,22 @@ def interactive_login(
                         )
                         last_url = current_url
 
-                    if url_matches_base(current_url, cfg.jira_url) or url_matches_base(
+                    is_target_origin = url_matches_base(current_url, cfg.jira_url) or url_matches_base(
                         current_url, cfg.confluence_url
-                    ):
+                    )
+                    if is_target_origin:
+                        # Verify actual authentication via in-page fetch
+                        try:
+                            check_path = "/rest/api/space?limit=1" if service == "confluence" else "/rest/api/2/myself"
+                            api_status = page.evaluate(
+                                f'fetch("{check_path}").then(r => r.status).catch(() => 0)'
+                            )
+                            if api_status == 401 or api_status == 0:
+                                time.sleep(2)
+                                continue
+                        except Exception:
+                            time.sleep(2)
+                            continue
                         context.storage_state(path=str(cfg.storage_state))
                         cfg.storage_state.chmod(0o600)
                         context.close()
@@ -447,6 +460,13 @@ class BrowserCookieSession(requests.Session):
                 if not looks_like_sso_response(retest) and retest.status_code != 401:
                     return retest
                 retest.close()
+                # Delete stale storage state and browser profile so interactive_login
+                # forces a full SSO flow instead of reusing cached browser cookies.
+                if self.browser_config.storage_state.exists():
+                    self.browser_config.storage_state.unlink()
+                import shutil
+                if self.browser_config.profile_dir.exists():
+                    shutil.rmtree(self.browser_config.profile_dir, ignore_errors=True)
                 interactive_login(self.service, config=self.browser_config)
                 self.refresh_cookies()
             return self.request(
