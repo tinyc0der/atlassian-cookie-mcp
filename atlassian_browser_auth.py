@@ -238,39 +238,51 @@ def interactive_login(
                 page.goto(target_url, wait_until="domcontentloaded")
                 _best_effort_prefill(page, cfg.username)
 
-                last_url = page.url
+                # Auth detection is fully URL-INDEPENDENT and IdP-agnostic. We do
+                # NOT watch page.url to decide when login is done — after a SAML
+                # form POST the page handle can stay stuck reporting the IdP URL
+                # (e.g. the corporate Okta/ADFS/Azure AD SSO host) even though the
+                # user is looking at a logged-in Confluence/Jira tab. Instead we
+                # probe the browser CONTEXT's cookies against the real REST API
+                # every tick via context.request (which shares the context cookie
+                # jar). This works for any Atlassian Server/DC instance behind any
+                # SSO provider, with no hardcoded host or marker assumptions.
+                # max_redirects=0 means an unauthenticated session (302 -> login)
+                # surfaces as a non-200 instead of following through to a 200 HTML
+                # login page, so only a genuine authenticated 200 closes the window.
+                check_path = "/rest/api/space?limit=1" if service == "confluence" else "/rest/api/2/myself"
+                api_url = f"{cfg.service_base(service)}{check_path}"
+                last_url = None
                 while time.time() < deadline:
                     try:
                         current_url = page.url
-                    except Error:
-                        break
-
-                    if current_url != last_url:
-                        parsed = urlparse(current_url)
-                        safe_url = urlunparse(parsed._replace(query="", fragment=""))
-                        print(
-                            f"[atlassian-browser-auth] Browser now at: {safe_url}",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                        last_url = current_url
-
-                    is_target_origin = url_matches_base(current_url, cfg.jira_url) or url_matches_base(
-                        current_url, cfg.confluence_url
-                    )
-                    if is_target_origin:
-                        # Verify actual authentication via in-page fetch
-                        try:
-                            check_path = "/rest/api/space?limit=1" if service == "confluence" else "/rest/api/2/myself"
-                            api_status = page.evaluate(
-                                f'fetch("{check_path}").then(r => r.status).catch(() => 0)'
+                        if current_url != last_url:
+                            parsed = urlparse(current_url)
+                            safe_url = urlunparse(parsed._replace(query="", fragment=""))
+                            print(
+                                f"[atlassian-browser-auth] Browser now at: {safe_url}",
+                                file=sys.stderr,
+                                flush=True,
                             )
-                            if api_status == 401 or api_status == 0:
-                                time.sleep(2)
-                                continue
-                        except Exception:
-                            time.sleep(2)
-                            continue
+                            last_url = current_url
+                    except Error:
+                        # Page may be mid-navigation; keep probing cookies anyway.
+                        pass
+
+                    authenticated = False
+                    try:
+                        resp = context.request.get(
+                            api_url,
+                            max_redirects=0,
+                            fail_on_status_code=False,
+                            headers={"Accept": "application/json"},
+                            timeout=15000,
+                        )
+                        authenticated = resp.status == 200
+                    except Error:
+                        authenticated = False
+
+                    if authenticated:
                         context.storage_state(path=str(cfg.storage_state))
                         cfg.storage_state.chmod(0o600)
                         context.close()
@@ -282,20 +294,20 @@ def interactive_login(
                         return {
                             "status": "ok",
                             "service": service,
-                            "final_url": current_url,
                             "storage_state": str(cfg.storage_state),
                         }
-                    time.sleep(1)
+                    time.sleep(1.5)
             except Error as exc:
                 context.close()
                 raise RuntimeError(
                     f"Browser closed unexpectedly during {service} login: {exc}"
                 ) from exc
 
-            current_url = page.url
+            try:
+                safe_url = urlunparse(urlparse(page.url)._replace(query="", fragment=""))
+            except Error:
+                safe_url = "(unknown)"
             context.close()
-            parsed = urlparse(current_url)
-            safe_url = urlunparse(parsed._replace(query="", fragment=""))
             raise RuntimeError(
                 "Timed out waiting for Atlassian login to complete. "
                 f"Last page: {safe_url}. "
@@ -418,7 +430,15 @@ class BrowserCookieSession(requests.Session):
         self.base_url = base_url.rstrip("/")
         self.browser_config = config or BrowserAuthConfig.from_env()
         self.trust_env = False
-        self.headers.update({"User-Agent": self.browser_config.user_agent})
+        self.headers.update({
+            "User-Agent": self.browser_config.user_agent,
+            # Jira/Confluence Data Center reject cookie-authenticated mutating
+            # requests (POST/PUT/DELETE) as XSRF unless both this header AND a
+            # same-origin Origin header are present. Origin is the load-bearing
+            # one; X-Atlassian-Token alone is not sufficient.
+            "X-Atlassian-Token": "no-check",
+            "Origin": self.base_url,
+        })
         try:
             self.refresh_cookies()
         except Exception as exc:
