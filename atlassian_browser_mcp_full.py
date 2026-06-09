@@ -14,11 +14,8 @@ from atlassian import Confluence, Jira
 from requests.exceptions import HTTPError
 
 from atlassian_browser_auth import (
-    BrowserAuthConfig,
     browser_auth_enabled,
     create_browser_session,
-    interactive_login,
-    url_matches_base,
 )
 
 # Make the upstream server expose its complete tool surface.
@@ -123,7 +120,12 @@ def _patch_jira_client_init(self: JiraClient, config: Any | None = None) -> None
         return
 
     self.config = config or JiraConfig.from_env()
-    session = create_browser_session("jira", self.config.url)
+    # allow_interactive=False: the MCP server must NEVER open a browser. An
+    # interactive login from inside this detached, async-dispatched server is
+    # what made tool calls hang forever. On a cookie cache-miss the session
+    # raises AuthRequiredError, which surfaces as a clear "run atlassian-cli
+    # login jira" message. Authentication is done out-of-band via the CLI.
+    session = create_browser_session("jira", self.config.url, allow_interactive=False)
     self.jira = Jira(
         url=self.config.url,
         session=session,
@@ -156,7 +158,9 @@ def _patch_confluence_client_init(
         return
 
     self.config = config or ConfluenceConfig.from_env()
-    session = create_browser_session("confluence", self.config.url)
+    # allow_interactive=False — see the Jira patch above; the server never
+    # opens a browser, it raises AuthRequiredError on a cookie cache-miss.
+    session = create_browser_session("confluence", self.config.url, allow_interactive=False)
     self.confluence = Confluence(
         url=self.config.url,
         session=session,
@@ -264,14 +268,30 @@ def atlassian_login(
     target: Literal["jira", "confluence"] = "jira",
     url: str | None = None,
 ) -> dict[str, Any]:
-    """Launch a visible browser and wait for manual SSO / MFA login."""
+    """Report how to authenticate. Login is handled OUT-OF-BAND by the CLI.
 
-    if url:
-        cfg = BrowserAuthConfig.from_env()
-        allowed_base = cfg.jira_url if target == "jira" else cfg.confluence_url
-        if not url_matches_base(url, allowed_base):
-            return {"status": "error", "message": f"URL must be under {allowed_base}"}
-    return interactive_login(target, url)
+    This tool intentionally does NOT drive Playwright in-process: a sync
+    browser login inside the async-dispatched MCP server deadlocks the event
+    loop ("Playwright Sync API inside the asyncio loop") and was a cause of the
+    server hanging. Instead, run the CLI in a terminal where a browser can open:
+
+        atlassian-cli login <jira|confluence>
+
+    Once that completes, the saved cookie jar is reused by the server's tools
+    automatically — no browser is ever opened from within the server.
+    """
+    cli = os.path.join(os.path.dirname(os.path.abspath(__file__)), "atlassian-cli")
+    return {
+        "status": "action_required",
+        "service": target,
+        "message": (
+            f"Authentication for {target} is done out-of-band to keep the server "
+            f"non-blocking. In a terminal with a display, run:  {cli} login {target}  "
+            f"then retry your request. The server reuses the saved session and "
+            f"never opens a browser itself."
+        ),
+        "command": f"{cli} login {target}",
+    }
 
 
 def main() -> None:

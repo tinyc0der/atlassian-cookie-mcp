@@ -22,6 +22,25 @@ logger = logging.getLogger("atlassian-browser-auth")
 
 ServiceName = Literal["jira", "confluence"]
 
+
+class AuthRequiredError(RuntimeError):
+    """Raised when a non-interactive session has no valid cookies.
+
+    The caller (e.g. the MCP server) should surface this to the user as a
+    clear instruction to authenticate out-of-band, instead of blocking on an
+    interactive browser login. Carries the service so the message can name the
+    exact command to run.
+    """
+
+    def __init__(self, service: ServiceName) -> None:
+        self.service = service
+        super().__init__(
+            f"Not authenticated for {service}. Run `atlassian-cli login {service}` "
+            f"in a terminal to sign in, then retry. (The server never opens a "
+            f"browser itself to avoid hanging.)"
+        )
+
+
 _LOGIN_LOCK = threading.Lock()
 _USERNAME_SELECTORS = [
     'input[name="identifier"]',
@@ -644,11 +663,20 @@ class BrowserCookieSession(requests.Session):
         service: ServiceName,
         base_url: str,
         config: BrowserAuthConfig | None = None,
+        allow_interactive: bool = True,
     ) -> None:
         super().__init__()
         self.service = service
         self.base_url = base_url.rstrip("/")
         self.browser_config = config or BrowserAuthConfig.from_env(service)
+        # When False, this session NEVER launches a browser. It only reads the
+        # saved cookie jar and, on a cache miss or auth failure, raises
+        # AuthRequiredError instead of blocking on interactive_login(). This is
+        # what makes the MCP server safe: an interactive login from inside a
+        # detached, async-dispatched server process is exactly what caused the
+        # server to hang forever. The CLI keeps allow_interactive=True so
+        # `atlassian-cli login` can still open a browser in the foreground.
+        self.allow_interactive = allow_interactive
         self.trust_env = False
         self.headers.update({
             "User-Agent": self.browser_config.user_agent,
@@ -661,11 +689,16 @@ class BrowserCookieSession(requests.Session):
         })
         try:
             self.refresh_cookies()
+        except AuthRequiredError:
+            # Non-interactive mode with no saved session: re-raise so the caller
+            # (e.g. the MCP server) gets an immediate, clear "log in" signal
+            # instead of a half-built session that fails opaquely on first use.
+            raise
         except Exception as exc:
             logger.debug("Cookie loading failed for %s", service, exc_info=True)
             print(
                 f"[atlassian-browser-auth] Could not load browser cookies for {service}: {exc}. "
-                "Run atlassian_login tool to authenticate.",
+                "Run `atlassian-cli login` to authenticate.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -673,10 +706,14 @@ class BrowserCookieSession(requests.Session):
     def refresh_cookies(self) -> None:
         """Reload cookies from storage state, triggering login if needed."""
         if not self.browser_config.storage_state.exists():
+            # Non-interactive (server) mode: never open a browser — fail fast
+            # with a clear instruction instead of blocking the caller.
+            if not self.allow_interactive:
+                raise AuthRequiredError(self.service)
             if not sys.stdin.isatty() and not os.environ.get("DISPLAY") and sys.platform != "darwin":
                 print(
                     "[atlassian-browser-auth] WARNING: No display available (headless environment). "
-                    "Run atlassian_login tool manually or set ATLASSIAN_BROWSER_AUTH_ENABLED=false for token auth.",
+                    "Run `atlassian-cli login` manually or set ATLASSIAN_BROWSER_AUTH_ENABLED=false for token auth.",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -694,6 +731,18 @@ class BrowserCookieSession(requests.Session):
         needs_reauth = looks_like_sso_response(response) or response.status_code == 401
         if retry_on_auth and needs_reauth:
             response.close()
+            # Non-interactive (server) mode: the cookies on disk may have been
+            # refreshed by a separate `atlassian-cli login`, so reload them once
+            # and retry — but NEVER open a browser here. If still unauthorized,
+            # raise so the caller can tell the user to log in out-of-band.
+            if not self.allow_interactive:
+                with _LOGIN_LOCK:
+                    self.refresh_cookies()  # reload from disk; raises if absent
+                    retest = super().request(method, url, *args, **kwargs)
+                if not looks_like_sso_response(retest) and retest.status_code != 401:
+                    return retest
+                retest.close()
+                raise AuthRequiredError(self.service)
             with _LOGIN_LOCK:
                 self.refresh_cookies()
                 retest = super().request(method, url, *args, **kwargs)
@@ -724,6 +773,17 @@ def create_browser_session(
     service: ServiceName,
     base_url: str,
     config: BrowserAuthConfig | None = None,
+    allow_interactive: bool = True,
 ) -> BrowserCookieSession:
-    """Create a BrowserCookieSession for the given Atlassian service."""
-    return BrowserCookieSession(service=service, base_url=base_url, config=config)
+    """Create a BrowserCookieSession for the given Atlassian service.
+
+    Pass allow_interactive=False for server contexts (e.g. the MCP server) so
+    the session reads saved cookies but never opens a browser — it raises
+    AuthRequiredError on a cache miss instead of hanging.
+    """
+    return BrowserCookieSession(
+        service=service,
+        base_url=base_url,
+        config=config,
+        allow_interactive=allow_interactive,
+    )

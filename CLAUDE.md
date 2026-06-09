@@ -11,6 +11,33 @@ MCP server wrapping upstream [mcp-atlassian](https://github.com/sooperset/mcp-at
 - `atlassian_cli.py` + `atlassian-cli` — Command-line front-end over the same auth core (Jira/Confluence get/search, login). Preferred for agents and scripting; no MCP transport involved. See `AGENT_USAGE.md`.
 - `run-atlassian-browser-mcp.sh` — MCP launcher: creates venv via `uv`, installs deps, runs upstream compatibility check, starts server.
 
+## ⚠️ Two-process architecture: the server NEVER opens a browser
+
+Authentication and serving are **deliberately separate jobs**:
+
+- **Authentication is interactive and slow** → done **only** by the CLI in the
+  foreground (`atlassian-cli login <jira|confluence>`), where a browser can
+  actually open. `BrowserCookieSession(allow_interactive=True)` (the CLI
+  default) may call `interactive_login()`.
+- **Serving is fast, stateless HTTP** → the MCP server constructs sessions with
+  `allow_interactive=False`. Such a session reads the saved cookie jar and, on a
+  cache miss or 401, raises `AuthRequiredError` **immediately** ("run
+  `atlassian-cli login …`") instead of launching a browser.
+
+**Why this exists (the bug it fixes):** the server used to call
+`interactive_login()` from inside its detached, async-dispatched process. That
+(a) blocked the tool call up to `ATLASSIAN_LOGIN_TIMEOUT_SECONDS` (≈5 min, often
+forever) waiting for a human who can't see the window, and (b) ran
+`sync_playwright()` on the asyncio event loop, which deadlocks ("Playwright Sync
+API inside the asyncio loop"). Net effect: **MCP Atlassian calls hung forever.**
+
+**Hard rules — do not regress:**
+- The MCP server (`_patch_*_client_init`, `atlassian_login` tool) must NEVER
+  call `interactive_login()` or otherwise drive Playwright in-process. The
+  `atlassian_login` tool returns instructions only.
+- Any new server-side session must pass `allow_interactive=False`.
+- Login happens out-of-band via the CLI; the server reuses the saved jar.
+
 ## ⚠️ Authentication: ALWAYS reuse the browser profile (do not re-enter user/pw)
 
 Re-entering corporate username/password + MFA on every run is a real pain and

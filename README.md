@@ -14,12 +14,14 @@ MCP server that wraps the upstream [mcp-atlassian](https://github.com/sooperset/
 
 ## How it works
 
-1. On first use (or when the session expires), Playwright opens a real Chromium window for manual SSO/MFA
-2. After login, cookies are saved to a Playwright storage-state file
-3. All subsequent MCP tool calls use those cookies via a custom `requests.Session` subclass
-4. If an API response looks like an SSO redirect, the browser reopens automatically
+Authentication and serving are **two separate processes** — this is what keeps the MCP server from hanging:
 
-The server monkey-patches `JiraClient` and `ConfluenceClient` constructors in `mcp-atlassian` to inject the browser-backed session, giving full parity with the upstream tool surface (72 tools + 1 `atlassian_login` helper = 73 total).
+1. **Authenticate with the CLI** (foreground, where a browser can open): `atlassian-cli login <jira|confluence>` runs Playwright, you complete SSO/MFA once, and cookies are saved to a per-service storage-state file.
+2. **The MCP server serves data only.** It reads the saved cookies via a custom `requests.Session` subclass and never opens a browser. On a missing/expired session it fails fast with an `AuthRequiredError` telling you to run the CLI login — it does **not** block waiting for an interactive login.
+
+> ⚠️ Earlier versions launched the login browser from inside the server. Because the server is detached and async, that blocked tool calls for minutes (often forever) and could deadlock Playwright's sync API on the event loop. The CLI/server split (`allow_interactive=False` on server sessions) removes that failure mode entirely.
+
+The server monkey-patches `JiraClient` and `ConfluenceClient` constructors in `mcp-atlassian` to inject the browser-cookie session, giving full parity with the upstream tool surface.
 
 ## Files
 

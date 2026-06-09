@@ -15,19 +15,26 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
   uv venv "${VENV_DIR}"
 fi
 
+# Check the package and its deps are importable — NOT an exact version. Pinning
+# an exact version here meant every version bump forced a reinstall on startup
+# (slow, network-dependent: a hang vector). We only reinstall when something is
+# actually missing/broken.
 if ! "${PYTHON_BIN}" - <<'PY' >/dev/null 2>&1
-from importlib.metadata import version
-assert version("atlassian-browser-mcp") == "1.0.3"
-import mcp_atlassian
-import playwright
-import requests
+import importlib.metadata as m
+m.version("atlassian-browser-mcp")  # raises if not installed
+import mcp_atlassian, playwright, requests  # noqa: F401
 PY
 then
-  uv pip install --python "${PYTHON_BIN}" -e "${ROOT_DIR}"
+  # Bound the install so a slow/offline network fails fast instead of hanging
+  # the MCP startup forever. 600s is generous for a cold editable install.
+  timeout 600 uv pip install --python "${PYTHON_BIN}" -e "${ROOT_DIR}" \
+    || { echo "atlassian-browser-mcp: dependency install failed or timed out" >&2; exit 1; }
 fi
 
-"${PYTHON_BIN}" -m playwright install --list 2>/dev/null | grep -q "chromium" \
-  || "${PYTHON_BIN}" -m playwright install chromium >/dev/null
+if ! "${PYTHON_BIN}" -m playwright install --list 2>/dev/null | grep -q "chromium"; then
+  timeout 600 "${PYTHON_BIN}" -m playwright install chromium >/dev/null \
+    || { echo "atlassian-browser-mcp: playwright chromium install failed or timed out" >&2; exit 1; }
+fi
 
 # Startup compatibility assertion: verify the upstream version and patched signatures
 "${PYTHON_BIN}" - <<'PY'
