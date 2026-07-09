@@ -8,14 +8,16 @@ requests.Session, so there is no MCP transport or upstream mcp-atlassian layer
 to break.
 
 Auth: reuses cookies captured by the Chrome extension (see chrome-extension/)
-via `import`. If cookies are missing or expired, export them with the extension
-and run `import`, then retry. No browser is ever opened by this tool.
+via one-click **Sync** (Chrome Native Messaging host) or `import` from a JSON
+export. If cookies are missing or expired, sync/import again. No browser is
+ever opened by this tool.
 
 Env (required, no defaults — same as the rest of this project):
   JIRA_URL         e.g. <your-jira-host>
   CONFLUENCE_URL   e.g. <your-confluence-host>
 
 Examples:
+  atlassian-cli install-host          # one-time: register native messaging host
   atlassian-cli import ~/Downloads/atlassian-cookies.json
   atlassian-cli jira get PROJ-123 --comments
   atlassian-cli jira search 'project = PROJ AND status = "In Progress"' --max 10
@@ -37,10 +39,13 @@ from typing import Any
 
 from atlassian_browser_auth import (  # noqa: E402
     BrowserAuthConfig,
-    _cookie_matches_base_url,
     create_browser_session,
-    probe_live,
-    write_storage_state,
+)
+from atlassian_cookie_import import import_cookies  # noqa: E402
+from atlassian_native_host import (  # noqa: E402
+    EXTENSION_ID,
+    NATIVE_HOST_NAME,
+    install_native_host,
 )
 
 
@@ -91,8 +96,8 @@ def _get_json(service: str, path: str, params: dict | None = None) -> Any:
         else:
             _eprint(
                 f"(response {len(r.content)} bytes, content-type={ctype}; "
-                "if this looks like an SSO page, re-export cookies with the "
-                "extension and run: atlassian-cli import <file>)"
+                "if this looks like an SSO page, Sync cookies in the "
+                "extension or run: atlassian-cli import <file>)"
             )
         sys.exit(2)
     return r.json()
@@ -131,6 +136,9 @@ def cmd_import(args: argparse.Namespace) -> None:
     and writes each service's jar, then probes the REST API so the user gets
     immediate confirmation the imported session is live. On success (jars
     written), deletes the source export JSON so live cookies do not linger.
+
+    Prefer the extension **Sync** button (native messaging) when
+    ``install-host`` has been run; this file-based path remains as fallback.
     """
     try:
         with open(args.file) as fh:
@@ -143,50 +151,66 @@ def cmd_import(args: argparse.Namespace) -> None:
         _eprint(f"invalid export {args.file}: missing a 'cookies' list")
         sys.exit(2)
 
-    services = [args.service] if args.service else ["jira", "confluence"]
-    any_live = False
-    any_matched = False
-    for svc in services:
-        cfg = BrowserAuthConfig.from_env(svc)
-        base = cfg.service_base(svc)
-        matched = [c for c in cookies if _cookie_matches_base_url(c, base)]
-        if not matched:
-            _eprint(f"{svc}: no cookies in the export match {base} — skipped")
+    result = import_cookies(cookies, service=args.service)
+    for svc in result.services:
+        if svc.skipped:
+            _eprint(f"{svc.service}: {svc.message} — skipped")
             continue
-        any_matched = True
-        write_storage_state(matched, cfg.storage_state)
-        status = probe_live(base, svc, matched, cfg.user_agent)
-        if status == 200:
-            any_live = True
-            print(
-                f"{svc}: imported {len(matched)} cookies -> HTTP 200 (live)  "
-                f"[{cfg.storage_state.name}]"
-            )
+        jar_name = Path(svc.jar).name if svc.jar else "?"
+        if svc.status == 200:
+            print(f"{svc.service}: {svc.message}  [{jar_name}]")
         else:
             print(
-                f"{svc}: imported {len(matched)} cookies -> HTTP {status} "
-                f"(NOT live; sign into {svc} in your browser and re-export)"
+                f"{svc.service}: {svc.message} "
+                f"(sign into {svc.service} in your browser and re-sync)"
             )
 
-    if not any_matched:
-        _eprint(
-            "No cookies matched your JIRA_URL / CONFLUENCE_URL hosts. Check the "
-            "export file and that those env vars point at the right instance."
-        )
+    if result.error and not result.any_matched:
+        _eprint(result.error)
         sys.exit(2)
 
-    # Export holds live session cookies — remove it once jars are written so it
-    # does not linger in Downloads (SECURITY.md). Keep the file only when import
-    # never consumed it (parse error / no host match above).
-    export_path = Path(args.file)
+    if result.any_matched:
+        # Export holds live session cookies — remove it once jars are written.
+        export_path = Path(args.file)
+        try:
+            export_path.unlink(missing_ok=True)
+            print(f"removed export {export_path}")
+        except OSError as exc:
+            _eprint(f"warning: could not remove export {export_path}: {exc}")
+
+    if not result.any_live:
+        sys.exit(2)
+
+
+def cmd_install_host(args: argparse.Namespace) -> None:
+    """Register the Chrome Native Messaging host for one-click Sync."""
+    if getattr(args, "all_browsers", False):
+        browsers: list[str] | None = ["all"]
+    elif getattr(args, "browsers", None):
+        browsers = [b.strip() for b in args.browsers.split(",") if b.strip()]
+    else:
+        browsers = None  # Chrome only
     try:
-        export_path.unlink(missing_ok=True)
-        print(f"removed export {export_path}")
-    except OSError as exc:
-        _eprint(f"warning: could not remove export {export_path}: {exc}")
-
-    if not any_live:
+        info = install_native_host(browsers=browsers)
+    except RuntimeError as exc:
+        _eprint(str(exc))
         sys.exit(2)
+
+    print(f"native host:  {info['host_name']}")
+    print(f"launcher:     {info['launcher']}")
+    print(f"env file:     {info['env_file']}")
+    print(f"extension id: {info['extension_id']}")
+    print("manifests:")
+    for m in info["manifests"]:
+        print(f"  {m}")
+    print()
+    print("Next:")
+    print("  1. chrome://extensions → Load unpacked → chrome-extension/")
+    print(f"     (expected id: {EXTENSION_ID})")
+    print("  2. Click the extension → Sync cookies")
+    print(f"  3. Host name Chrome uses: {NATIVE_HOST_NAME}")
+    if args.json:
+        print(json.dumps(info, indent=2))
 
 
 def cmd_jira_get(args: argparse.Namespace) -> None:
@@ -277,6 +301,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="only import this service (default: both)",
     )
     pi.set_defaults(func=cmd_import)
+
+    ph = sub.add_parser(
+        "install-host",
+        help="register Chrome Native Messaging host for extension Sync",
+    )
+    ph.add_argument(
+        "--json",
+        action="store_true",
+        help="also print the install result as JSON",
+    )
+    ph.add_argument(
+        "--all-browsers",
+        action="store_true",
+        help="also register Brave/Edge/Chromium/etc. (default: Google Chrome only)",
+    )
+    ph.add_argument(
+        "--browsers",
+        metavar="LIST",
+        help="comma-separated browser ids (chrome,brave,edge,…); default: chrome",
+    )
+    ph.set_defaults(func=cmd_install_host)
 
     pj = sub.add_parser("jira", help="Jira commands").add_subparsers(dest="jcmd", required=True)
     g = pj.add_parser("get", help="get an issue")

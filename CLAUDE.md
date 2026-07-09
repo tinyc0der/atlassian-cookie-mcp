@@ -8,8 +8,10 @@ MCP server wrapping upstream [mcp-atlassian](https://github.com/sooperset/mcp-at
 
 - `atlassian_browser_mcp_full.py` — MCP entrypoint. Monkey-patches upstream `JiraClient` and `ConfluenceClient` constructors to inject browser-cookie sessions. Registers `atlassian_login` tool (returns instructions only). Runs the MCP server.
 - `atlassian_browser_auth.py` — Shared auth core: `BrowserCookieSession` (requests.Session subclass), saved-jar loading, `write_storage_state`/`probe_live` helpers, SSO redirect detection. **Never opens a browser.** Both the MCP server and the CLI use this.
-- `atlassian_cli.py` + `atlassian-cli` — Command-line front-end over the same auth core (Jira/Confluence get/search; `import` loads extension-exported cookies into the per-service jars). Preferred for agents and scripting; no MCP transport involved. See `AGENT_USAGE.md`.
-- `chrome-extension/` — Manifest V3 Chrome extension. Reads live cookies via `chrome.cookies.getAll` and exports them as JSON for `atlassian-cli import`. The only way to seed cookies (Chrome 127+ app-bound cookies can't be read off disk, and no browser is ever driven).
+- `atlassian_cli.py` + `atlassian-cli` — Command-line front-end over the same auth core (`install-host`, `import`, Jira/Confluence get/search). Preferred for agents and scripting; no MCP transport involved. See `AGENT_USAGE.md`.
+- `atlassian_cookie_import.py` — Shared import + probe used by CLI and native host.
+- `atlassian_native_host.py` + `atlassian-native-host` — Chrome Native Messaging host for one-click extension **Sync** (no Downloads).
+- `chrome-extension/` — Manifest V3 Chrome extension. Reads live cookies via `chrome.cookies.getAll` and Syncs them via the native host (or downloads JSON for `import`). The only way to seed cookies (Chrome 127+ app-bound cookies can't be read off disk, and no browser is ever driven).
 - `run-atlassian-browser-mcp.sh` — MCP launcher: creates venv via `uv`, installs deps, runs upstream compatibility check, starts server.
 
 ## ⚠️ The server NEVER opens a browser (nothing here does)
@@ -18,9 +20,10 @@ Capturing cookies and serving REST calls are **separate jobs**, and **no part of
 this tool opens a browser or drives Playwright** — Playwright has been removed
 entirely.
 
-- **Capturing cookies is out-of-band**: the user exports cookies with the Chrome
-  extension (`chrome-extension/`) and loads them via `atlassian-cli import`.
-  Interactive login is not something this tool performs.
+- **Capturing cookies is out-of-band**: the user Syncs cookies with the Chrome
+  extension (`chrome-extension/`) via the native host (`install-host`), or
+  downloads JSON and runs `atlassian-cli import`. Interactive login is not
+  something this tool performs.
 - **Serving is fast, stateless HTTP**: `BrowserCookieSession` reads the saved
   cookie jar and, on a cache miss or 401, raises `AuthRequiredError`
   **immediately** ("export cookies and run `atlassian-cli import`") instead of
@@ -48,23 +51,25 @@ extension eliminates that hang class entirely.
 Re-entering corporate username/password + MFA on every run must be avoided; the
 whole point is a **persistent, reusable session**. How it stays reliable:
 
-1. **Export from real Chrome with the extension.** `chrome-extension/` reads the
+1. **Sync from real Chrome with the extension.** `chrome-extension/` reads the
    live cookie store via `chrome.cookies.getAll` (plaintext, incl. HttpOnly), so
    it reuses whatever SSO session Chrome already has — no password, no MFA
-   re-prompt. This is the supported path because **Chrome 127+ "app-bound"
-   cookies cannot be decrypted off disk**, which is exactly why reading the
-   cookie SQLite DB failed for modern Chrome and why Playwright was previously
-   needed. (A previous version also tried decrypting other browsers' cookie DBs
-   directly; that was removed in favor of the extension-only path.)
+   re-prompt. Preferred path: **Sync** → native host → jars (after
+   `install-host`). Fallback: download JSON + `import`. This is the supported
+   path because **Chrome 127+ "app-bound" cookies cannot be decrypted off disk**.
 2. **NEVER delete the cookie jars on an auth failure.** On re-auth, only the
    short-lived per-service cache (`.atlassian-browser-state-<svc>.json`) is
-   rewritten from a fresh export; nothing long-lived is wiped.
+   rewritten from a fresh sync/import; nothing long-lived is wiped.
+3. **Native host env is separate from the shell.** Chrome launches the host with
+   a clean environment; `install-host` freezes `JIRA_URL`/`CONFLUENCE_URL` into
+   `.atlassian-native-host-env.json` (gitignored). Re-run `install-host` if those
+   URLs change.
 
 Jira and Confluence keep **separate cookie jars** (`*-state-jira.json`,
 `*-state-confluence.json`). On Atlassian Cloud they share one host, so a single
-extension export covers both; `import` writes both jars. All
-`.atlassian-browser-*` artifacts and `atlassian-cookies*.json` exports hold live
-credentials and are git-ignored — never commit them.
+extension Sync covers both. All `.atlassian-browser-*` artifacts,
+`.atlassian-native-host-env.json`, and `atlassian-cookies*.json` exports hold
+live credentials and are git-ignored — never commit them.
 
 Operational how-to (commands, env vars) lives in [`AGENT_USAGE.md`](AGENT_USAGE.md);
 this section is the rationale and the hard rules.

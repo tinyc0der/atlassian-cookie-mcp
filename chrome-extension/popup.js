@@ -6,10 +6,16 @@
 // which a { domain } query would miss) and, unlike document.cookie, INCLUDES
 // HttpOnly cookies in plaintext. No decryption, no Keychain, and none of the
 // Chrome 127+ app-bound-encryption problem that blocks reading the cookie DB
-// off disk. The output is Playwright storage_state shape so `atlassian-cli
-// import` consumes it unchanged.
+// off disk.
+//
+// Primary path: Chrome Native Messaging → local host → per-service jars
+// (atlassian-cli install-host). Fallback: download atlassian-cookies.json for
+// `atlassian-cli import`.
 
 const $ = (id) => document.getElementById(id);
+
+// Must match atlassian_native_host.NATIVE_HOST_NAME / install-host registration.
+const NATIVE_HOST = "com.atlassian_browser_mcp.cookie_host";
 
 function setStatus(msg, cls) {
   const el = $("status");
@@ -61,17 +67,14 @@ async function loadSaved() {
   $("confluence").value = confluenceHost;
 }
 
-async function exportCookies() {
-  setStatus("Working…");
-
+async function collectCookies() {
   const jira = normalizeToUrl($("jira").value);
   const conf = normalizeToUrl($("confluence").value);
   const urls = [];
   if (jira) urls.push(jira);
   if (conf && conf !== jira) urls.push(conf); // one origin on Cloud (shared host)
   if (!urls.length) {
-    setStatus("Enter at least one valid Jira or Confluence host.", "err");
-    return;
+    throw new Error("Enter at least one valid Jira or Confluence host.");
   }
 
   // Persist raw input so the fields are prefilled next time.
@@ -87,12 +90,10 @@ async function exportCookies() {
   try {
     granted = await chrome.permissions.request({ origins });
   } catch (e) {
-    setStatus("Permission request failed: " + e.message, "err");
-    return;
+    throw new Error("Permission request failed: " + e.message);
   }
   if (!granted) {
-    setStatus("Host permission denied — cannot read cookies for those hosts.", "err");
-    return;
+    throw new Error("Host permission denied — cannot read cookies for those hosts.");
   }
 
   const byKey = new Map();
@@ -101,18 +102,21 @@ async function exportCookies() {
     try {
       cookies = await chrome.cookies.getAll({ url });
     } catch (e) {
-      setStatus("cookies.getAll failed for " + url + ": " + e.message, "err");
-      return;
+      throw new Error("cookies.getAll failed for " + url + ": " + e.message);
     }
     for (const c of cookies) byKey.set(dedupeKey(c), mapCookie(c));
   }
 
   const cookies = [...byKey.values()];
   if (!cookies.length) {
-    setStatus("No cookies found. Sign in to Jira/Confluence in this browser, then retry.", "err");
-    return;
+    throw new Error(
+      "No cookies found. Sign in to Jira/Confluence in this browser, then retry.",
+    );
   }
+  return { cookies, urls };
+}
 
+function downloadJson(cookies) {
   const blob = new Blob([JSON.stringify({ cookies, origins: [] }, null, 2)], {
     type: "application/json",
   });
@@ -124,14 +128,104 @@ async function exportCookies() {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(href), 5000);
+}
 
-  setStatus(
-    `Exported ${cookies.length} cookies from ${urls.length} host(s) → atlassian-cookies.json`,
-    "ok",
-  );
+function sendNative(payload) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.runtime.sendNativeMessage(NATIVE_HOST, payload, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(response);
+      });
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+function formatServiceLines(services) {
+  if (!services || typeof services !== "object") return "";
+  const lines = [];
+  for (const [name, info] of Object.entries(services)) {
+    if (!info) continue;
+    if (info.skipped) {
+      lines.push(`${name}: skipped (${info.message || "no match"})`);
+      continue;
+    }
+    const st = info.status == null ? "?" : info.status;
+    const live = st === 200 ? "live" : "NOT live";
+    lines.push(`${name}: ${info.matched || 0} cookies → HTTP ${st} (${live})`);
+  }
+  return lines.join("\n");
+}
+
+async function syncCookies() {
+  setStatus("Working…");
+  try {
+    const { cookies, urls } = await collectCookies();
+    let response;
+    try {
+      response = await sendNative({ cmd: "import", cookies });
+    } catch (e) {
+      setStatus(
+        "Native host not available (" +
+          e.message +
+          ").\nRun: atlassian-cli install-host\n" +
+          "Or use “Download JSON only”, then:\n" +
+          "atlassian-cli import ~/Downloads/atlassian-cookies.json",
+        "err",
+      );
+      return;
+    }
+
+    if (!response || typeof response !== "object") {
+      setStatus("Native host returned an empty response.", "err");
+      return;
+    }
+    if (response.error && !response.any_matched) {
+      setStatus("Sync failed: " + response.error, "err");
+      return;
+    }
+
+    const lines = formatServiceLines(response.services);
+    if (response.ok || response.any_live) {
+      setStatus(
+        `Synced ${cookies.length} cookies from ${urls.length} host(s).\n${lines}`,
+        "ok",
+      );
+    } else {
+      setStatus(
+        `Imported cookies but session is NOT live.\n${lines}\n` +
+          (response.error ? response.error + "\n" : "") +
+          "Sign into Jira/Confluence in this browser and Sync again.",
+        "err",
+      );
+    }
+  } catch (e) {
+    setStatus(e.message || String(e), "err");
+  }
+}
+
+async function downloadOnly() {
+  setStatus("Working…");
+  try {
+    const { cookies, urls } = await collectCookies();
+    downloadJson(cookies);
+    setStatus(
+      `Exported ${cookies.length} cookies from ${urls.length} host(s) → atlassian-cookies.json\n` +
+        "Then: atlassian-cli import ~/Downloads/atlassian-cookies.json",
+      "ok",
+    );
+  } catch (e) {
+    setStatus(e.message || String(e), "err");
+  }
 }
 
 document.addEventListener("DOMContentLoaded", () => {
   loadSaved();
-  $("export").addEventListener("click", exportCookies);
+  $("sync").addEventListener("click", syncCookies);
+  $("download").addEventListener("click", downloadOnly);
 });

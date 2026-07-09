@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 import atlassian_cli as cli
+import atlassian_cookie_import as cookie_import
 
 
 def _write_export(tmp_path: Path, cookies: list[dict]) -> Path:
@@ -46,7 +47,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
     monkeypatch.setenv("CONFLUENCE_URL", "https://confluence.example.com")
     monkeypatch.setenv("ATLASSIAN_STORAGE_STATE", str(tmp_path / "state.json"))
-    monkeypatch.setattr(cli, "probe_live", lambda *a, **k: 200)
+    monkeypatch.setattr(cookie_import, "probe_live", lambda *a, **k: 200)
     return tmp_path
 
 
@@ -127,7 +128,7 @@ def test_not_live_exits_2_but_writes_jar(tmp_path, monkeypatch):
     monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
     monkeypatch.setenv("CONFLUENCE_URL", "https://confluence.example.com")
     monkeypatch.setenv("ATLASSIAN_STORAGE_STATE", str(tmp_path / "state.json"))
-    monkeypatch.setattr(cli, "probe_live", lambda *a, **k: 401)
+    monkeypatch.setattr(cookie_import, "probe_live", lambda *a, **k: 401)
     export = _write_export(tmp_path, [
         {"name": "JSESSIONID", "value": "j", "domain": "jira.example.com", "path": "/", "expires": -1},
     ])

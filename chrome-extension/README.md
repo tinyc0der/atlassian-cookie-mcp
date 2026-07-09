@@ -1,8 +1,8 @@
 # Atlassian Cookie Exporter (Chrome extension)
 
-A tiny Manifest V3 extension that exports your **live** Jira/Confluence session
-cookies to a JSON file, which [`atlassian-cli import`](../AGENT_USAGE.md) loads
-into the cookie jar the MCP server and CLI reuse.
+A tiny Manifest V3 extension that reads your **live** Jira/Confluence session
+cookies and **syncs** them to local tools via Chrome **Native Messaging** (or
+downloads a JSON file for [`atlassian-cli import`](../AGENT_USAGE.md)).
 
 ## Why an extension (and not Playwright / cookie-DB decryption)
 
@@ -24,41 +24,73 @@ cookies such as `.atlassian.net`.
 3. Click **Load unpacked** and select this `chrome-extension/` folder.
 4. Pin the extension and click its icon.
 
+Expected extension id (pinned via the manifest `key` field):
+`eiknaofpjmgjacfiihcmeifjmepobkla`.
+
 The same folder loads unchanged in Edge (`edge://extensions`), Brave, and Arc.
+
+## One-time: register the native host
+
+From the repo root, with `JIRA_URL` and `CONFLUENCE_URL` set (same values as MCP):
+
+```bash
+export JIRA_URL="https://yourco.atlassian.net"
+export CONFLUENCE_URL="https://yourco.atlassian.net"
+./atlassian-cli install-host
+```
+
+Default registers **Google Chrome only**. Other browsers:
+
+```bash
+./atlassian-cli install-host --browsers brave
+./atlassian-cli install-host --all-browsers
+```
+
+This writes:
+
+- `.atlassian-native-host-env.json` — URLs Chrome-launched host processes need
+  (Chrome does not pass your shell environment)
+- Native Messaging manifest under Chrome’s `NativeMessagingHosts/` dir
+  pointing at `./atlassian-native-host`
+
+Then **reload** the unpacked extension on `chrome://extensions`.
 
 ## Use
 
-1. Click the extension icon.
-2. Enter your **Jira host** and **Confluence host** (e.g.
-   `https://yourco.atlassian.net`). On Atlassian Cloud these are usually the same
-   host — enter it in both (or just one); duplicates are de-duped.
-3. Click **Export cookies**. On first use Chrome asks permission to read cookies
-   for those hosts — allow it. A file `atlassian-cookies.json` downloads.
-4. Import it:
+1. Sign into Jira/Confluence in this browser if needed.
+2. Click the extension icon; enter your **Jira** and **Confluence** hosts
+   (Cloud: usually the same tenant host).
+3. Click **Sync cookies** — the extension sends cookies to the native host,
+   which writes the per-service jars and probes the REST API.
+4. Optional: **Download JSON only** if the host is not installed; then:
 
    ```bash
    atlassian-cli import ~/Downloads/atlassian-cookies.json
    ```
 
-   The CLI splits the cookies into the Jira and Confluence jars and verifies each
-   is live (HTTP 200). Re-export whenever the session expires.
+Re-sync whenever the session expires.
 
 ## Permissions
 
-- `cookies` + `storage` (declared).
+- `cookies`, `storage`, `nativeMessaging` (declared).
 - Host access is **optional** and requested at runtime only for the specific
-  origins you enter — nothing is granted until you click Export and approve.
+  origins you enter — nothing is granted until you click Sync/Download and approve.
 
 ## Security
 
-The exported JSON contains **live session cookies** — treat it like a password.
-`atlassian-cli import` deletes the download after writing the jars. The `.atlassian-*` jars and any
-`*cookies*.json` files are git-ignored; never commit them.
+Cookies are session credentials. Prefer **Sync** (in-process handoff to the
+local host; jars written mode `0600`) over leaving JSON in Downloads.
+`atlassian-cli import` still deletes a download after writing jars. The
+`.atlassian-*` jars, host env file, and any `*cookies*.json` files are
+git-ignored; never commit them.
+
+The native host only accepts messages from this extension’s id (see
+`allowed_origins` in the host manifest).
 
 ## Managed / corporate Chrome caveat
 
-If your Chrome is managed by corporate policy, **Developer mode** or unpacked
-extensions may be blocked (`ExtensionInstallBlocklist`, developer-mode disabled).
-If "Load unpacked" is greyed out or the extension won't run, you'll need IT to
-allowlist the extension ID, or pack and self-host it — outside the scope of this
-repo.
+If your Chrome is managed by corporate policy, **Developer mode**, unpacked
+extensions, or **native messaging** may be blocked. If Sync fails with a host
+error and `install-host` cannot register, use **Download JSON only** +
+`atlassian-cli import`, or ask IT to allowlist the extension id and host name
+`com.atlassian_browser_mcp.cookie_host`.

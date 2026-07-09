@@ -40,10 +40,10 @@ class AuthRequiredError(RuntimeError):
     def __init__(self, service: ServiceName) -> None:
         self.service = service
         super().__init__(
-            f"Not authenticated for {service}. Export cookies with the Atlassian "
-            f"Cookie Exporter browser extension, then run "
-            f"`atlassian-cli import <file>` to load them. The server never opens "
-            f"a browser itself."
+            f"Not authenticated for {service}. Sync cookies with the Atlassian "
+            f"Cookie Exporter browser extension (after `atlassian-cli install-host`), "
+            f"or run `atlassian-cli import <file>` from a JSON export. The server "
+            f"never opens a browser itself."
         )
 
 
@@ -403,7 +403,7 @@ class BrowserCookieSession(requests.Session):
             logger.debug("Cookie loading failed for %s", service, exc_info=True)
             print(
                 f"[atlassian-browser-auth] Could not load browser cookies for {service}: {exc}. "
-                "Export cookies with the browser extension and run `atlassian-cli import`.",
+                "Sync cookies with the browser extension (or `atlassian-cli import`).",
                 file=sys.stderr,
                 flush=True,
             )
@@ -426,7 +426,7 @@ class BrowserCookieSession(requests.Session):
         On a re-auth signal we NEVER open a browser. We reload the saved jar (a
         separate `atlassian-cli import` may have refreshed it) and retry once. If
         it still doesn't authenticate, raise AuthRequiredError so the caller can
-        tell the user to re-export cookies with the extension.
+        tell the user to re-sync cookies with the extension.
         """
         retry_on_auth = kwargs.pop("_retry_on_auth", True)
         response = super().request(method, url, *args, **kwargs)

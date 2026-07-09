@@ -36,4 +36,7 @@ atlassian-browser-mcp = "atlassian_browser_mcp_full:main"
 py-modules = [
     "atlassian_browser_auth",
     "atlassian_browser_mcp_full",
+    "atlassian_cookie_import",
+    "atlassian_native_host",
+    "atlassian_cli",
 ]

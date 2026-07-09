@@ -16,8 +16,8 @@ MCP server that wraps the upstream [mcp-atlassian](https://github.com/sooperset/
 
 Capturing cookies and serving data are **separate**, and there is **no browser automation** anywhere — this is what keeps the MCP server from hanging:
 
-1. **Capture cookies with the Chrome extension.** Load `chrome-extension/` unpacked, click **Export**, and it reads your live Jira/Confluence cookies (plaintext, incl. HttpOnly) via `chrome.cookies.getAll` into a JSON file. Then `atlassian-cli import atlassian-cookies.json` loads them into per-service cookie jars.
-2. **The MCP server serves data only.** It reads the saved cookies via a custom `requests.Session` subclass and never opens a browser. On a missing/expired session it fails fast with an `AuthRequiredError` telling you to re-export — it does **not** block.
+1. **Capture cookies with the Chrome extension.** Load `chrome-extension/` unpacked. After a one-time `atlassian-cli install-host`, click **Sync cookies** — the extension hands cookies to a local Native Messaging host that writes per-service jars (no Downloads). Fallback: **Download JSON only** + `atlassian-cli import`.
+2. **The MCP server serves data only.** It reads the saved cookies via a custom `requests.Session` subclass and never opens a browser. On a missing/expired session it fails fast with an `AuthRequiredError` telling you to re-sync — it does **not** block.
 
 > ⚠️ Earlier versions launched a Playwright login browser from inside the server. Because the server is detached and async, that blocked tool calls for minutes (often forever) and could deadlock Playwright's sync API on the event loop. Moving capture to the extension removes that failure mode — and removes the need to read Chrome's on-disk cookie DB, which Chrome 127+ "app-bound" encryption blocks.
 
@@ -29,8 +29,10 @@ The server monkey-patches `JiraClient` and `ConfluenceClient` constructors in `m
 |------|---------|
 | `atlassian_browser_mcp_full.py` | MCP entrypoint. Patches upstream clients, registers `atlassian_login` tool, runs the MCP server |
 | `atlassian_browser_auth.py` | Shared auth core: `BrowserCookieSession`, saved-jar loading, `write_storage_state`/`probe_live`, SSO detection. Never opens a browser |
-| `atlassian_cli.py` + `atlassian-cli` | Command-line front-end (Jira/Confluence get/search; `import` loads extension cookies into the jars). Great for scripts and agents — see [`AGENT_USAGE.md`](AGENT_USAGE.md) |
-| `chrome-extension/` | Manifest V3 Chrome extension that exports your live cookies to JSON for `atlassian-cli import` — see [`chrome-extension/README.md`](chrome-extension/README.md) |
+| `atlassian_cli.py` + `atlassian-cli` | Command-line front-end (`install-host`, `import`, Jira/Confluence get/search). See [`AGENT_USAGE.md`](AGENT_USAGE.md) |
+| `atlassian_cookie_import.py` | Shared cookie → jar import + liveness probe (CLI and native host) |
+| `atlassian_native_host.py` + `atlassian-native-host` | Chrome Native Messaging host for one-click Sync |
+| `chrome-extension/` | Manifest V3 extension: Sync via native host, or download JSON — see [`chrome-extension/README.md`](chrome-extension/README.md) |
 | `run-atlassian-browser-mcp.sh` | MCP launcher: creates venv, installs deps via `uv`, runs compatibility check, starts server |
 | `pyproject.toml` | Dependency pins |
 
@@ -41,14 +43,14 @@ off disk, so the reliable way to reuse your Chrome SSO session is the bundled
 extension — it reads cookies from Chrome's live cookie store, no password or MFA
 re-prompt:
 
-1. `chrome://extensions` → enable **Developer mode** → **Load unpacked** →
-   select `chrome-extension/`.
-2. Click the extension, enter your Jira/Confluence hosts, click **Export**.
-3. `./atlassian-cli import ~/Downloads/atlassian-cookies.json` — splits the
-   cookies into per-service jars and verifies each is live.
+1. `export JIRA_URL=… CONFLUENCE_URL=…` then `./atlassian-cli install-host`
+   (registers the native host; freezes URLs for Chrome-launched processes).
+2. `chrome://extensions` → enable **Developer mode** → **Load unpacked** →
+   select `chrome-extension/` → reload after install-host.
+3. Click the extension, enter hosts, click **Sync cookies**.
 
 Cookie jars are **never auto-deleted** on an auth failure. Jira and Confluence
-keep separate jars; on Atlassian Cloud they share one host, so a single export
+keep separate jars; on Atlassian Cloud they share one host, so a single sync
 covers both. See [`chrome-extension/README.md`](chrome-extension/README.md) for
 details and the managed-Chrome caveat.
 
@@ -58,7 +60,11 @@ details and the managed-Chrome caveat.
 export JIRA_URL="https://yourco.atlassian.net"
 export CONFLUENCE_URL="https://yourco.atlassian.net"   # Cloud: same host
 
-./atlassian-cli import ~/Downloads/atlassian-cookies.json   # after extension Export
+./atlassian-cli install-host                               # once per machine
+# then: extension → Sync cookies
+# fallback:
+./atlassian-cli import ~/Downloads/atlassian-cookies.json
+
 ./atlassian-cli jira get PROJ-123 --comments
 ./atlassian-cli jira search 'project = PROJ AND status = "In Progress"'
 ./atlassian-cli confluence get 123456789 --markdown -o page.md
@@ -89,9 +95,9 @@ Add to your Claude Code, Cursor, or other MCP client configuration:
 }
 ```
 
-The server never opens a browser. Capture cookies once with the extension +
-`atlassian-cli import`; all MCP tool calls then proceed using the saved session,
-and a missing/expired session fails fast with a clear re-export message.
+The server never opens a browser. Capture cookies once with the extension Sync
+(or `import`); all MCP tool calls then proceed using the saved session, and a
+missing/expired session fails fast with a clear re-sync message.
 
 ### Environment variables
 
@@ -116,7 +122,7 @@ and a missing/expired session fails fast with a clear re-export message.
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Tools return `AuthRequiredError` / "not authenticated" | No saved session (jar missing or expired) | Export cookies with the extension, then `atlassian-cli import <file>` |
+| Tools return `AuthRequiredError` / "not authenticated" | No saved session (jar missing or expired) | Extension **Sync** (after `install-host`), or `atlassian-cli import <file>` |
 | `import` reports HTTP 401/302 (not live) | Exported cookies are already expired | Sign into Jira/Confluence in Chrome, re-**Export**, and `import` again |
 | No cookies match your hosts on `import` | `JIRA_URL`/`CONFLUENCE_URL` don't match the exported cookies' domain | Fix the env vars to point at the same instance you exported from |
 | "Load unpacked" is greyed out | Managed/corporate Chrome blocks unpacked extensions | Ask IT to allowlist the extension, or pack & self-host it (see `chrome-extension/README.md`) |

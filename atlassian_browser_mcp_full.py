@@ -273,7 +273,8 @@ def atlassian_login(
     This tool intentionally does NOT open a browser or drive Playwright (removed
     entirely): a sync browser login inside the async-dispatched MCP server
     deadlocks the event loop and hung the server. Instead, capture cookies with
-    the Chrome extension (chrome-extension/) and load them via the CLI:
+    the Chrome extension (chrome-extension/): prefer **Sync cookies** after
+    ``atlassian-cli install-host``, or download JSON and:
 
         atlassian-cli import ~/Downloads/atlassian-cookies.json
 
@@ -286,11 +287,14 @@ def atlassian_login(
         "service": target,
         "message": (
             f"Authentication for {target} is done out-of-band to keep the server "
-            f"non-blocking. Export cookies with the Chrome extension (chrome-extension/), "
-            f"then run:  {cli} import <atlassian-cookies.json>  and retry. "
+            f"non-blocking. One-time: `{cli} install-host` (with JIRA_URL/"
+            f"CONFLUENCE_URL set). Then click **Sync cookies** in the Chrome "
+            f"extension (chrome-extension/), or download JSON and run: "
+            f"`{cli} import <atlassian-cookies.json>`. Retry after syncing. "
             f"The server reuses the saved session and never opens a browser itself."
         ),
-        "command": f"{cli} import <atlassian-cookies.json>",
+        "command": f"{cli} install-host  # once; then extension Sync cookies",
+        "fallback_command": f"{cli} import <atlassian-cookies.json>",
     }
 
 

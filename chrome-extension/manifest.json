@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Atlassian Cookie Exporter",
-  "version": "1.0.0",
-  "description": "Export your live Jira/Confluence session cookies to a JSON file for atlassian-browser-mcp (atlassian-cli import).",
-  "permissions": ["cookies", "storage"],
+  "version": "1.1.0",
+  "description": "Sync live Jira/Confluence session cookies to atlassian-browser-mcp (native messaging) or download a JSON export.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAs82/9pQqspId7/ZkmhQplMhXEuPHEcwlr3Zbi9UeRJulaxIz9u6JxnU1v0N7zyu1JPz3ewGji/TpibtoYIYw44x0AFXbCSV6Xb/dmIUSyN1WMPIdY+Br44+nCiCnaqqg1vFzGCJSUj+QgoO5kODYL6iMJzU768heDkugq67WfMRVgvNC1dxekyKzN1CrXxsvgIxAGEyDEXga/gLWuwZqw+kub5tI4syUkgXnRuQ5ttAdkaltuH0U1D1dLHg/TyjgS1R9CaiwQKM5OFXqYMUZX4OmONzw9Of/2ZKpelN17B9Zdt3j1jamQc67C7gx/zyoLnUp/nzyF+X514PY6A01/wIDAQAB",
+  "permissions": ["cookies", "storage", "nativeMessaging"],
   "optional_host_permissions": ["https://*/*"],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Export Atlassian cookies"
+    "default_title": "Sync Atlassian cookies"
   }
 }

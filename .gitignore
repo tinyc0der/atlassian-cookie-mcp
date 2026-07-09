@@ -11,6 +11,9 @@ build/
 # Local uv lockfile (this project is not distributed via a locked uv workspace).
 uv.lock
 
+# Env snapshot for Chrome-launched native messaging host (URLs + jar paths).
+.atlassian-native-host-env.json
+
 # Browser profile(s) — live credentials. Covers the automation profile and any
 # timestamped .bak copies.
 .atlassian-browser-profile*

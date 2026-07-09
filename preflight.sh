@@ -15,7 +15,8 @@
 # Exit codes: 0 = all checked services GREEN; 1 = at least one RED.
 # Agent contract: a fast GREEN/RED check before Atlassian calls. If RED, re-auth
 # by exporting cookies with the browser extension and running
-# `atlassian-cli import <file>`. The MCP server fails fast on a missing session —
+# extension Sync (after install-host) or `atlassian-cli import <file>`. The MCP
+# server fails fast on a missing session —
 # it never hangs — but a GREEN check still saves a round-trip.
 
 set -uo pipefail
@@ -87,7 +88,7 @@ PY
   done <<< "$states"
 
   if [[ "$had_cookies" == "0" ]]; then
-    echo "RED  $svc  (no $host cookies; no live browser session) — export via the browser extension, then: atlassian-cli import <file>"
+    echo "RED  $svc  (no $host cookies; no live browser session) — extension Sync (or: atlassian-cli import <file>)"
     return 1
   fi
   # had cookies but none authenticated — classify by the last response code
