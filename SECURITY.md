@@ -46,7 +46,7 @@ Only the latest version receives security updates. We recommend always running t
 ### For Users
 
 1. **Never commit the cookie jars or exports** - `.atlassian-browser-state-*.json` and `atlassian-cookies*.json` contain live session cookies
-2. **Prefer Sync over Downloads** - Extension **Sync** uses Native Messaging (no JSON in Downloads). If you download JSON, `atlassian-cli import` removes it after writing jars. Treat leftovers like a password.
+2. **Prefer extension Sync** - Native Messaging hands cookies to the local host (no Downloads). Treat any leftover cookie JSON like a password.
 3. **Use environment variables** for all configuration
 4. **Keep updated** - Run the latest version of both this wrapper and `mcp-atlassian`
 

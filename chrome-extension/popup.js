@@ -1,16 +1,9 @@
-// Atlassian Cookie Exporter — popup logic.
+// Atlassian Cookie Sync — popup logic.
 //
-// Reads live cookies for the configured Jira/Confluence host(s) via
-// chrome.cookies.getAll({ url }) — which returns exactly the cookies the browser
-// would send to that URL (including parent-domain cookies like `.atlassian.net`,
-// which a { domain } query would miss) and, unlike document.cookie, INCLUDES
-// HttpOnly cookies in plaintext. No decryption, no Keychain, and none of the
-// Chrome 127+ app-bound-encryption problem that blocks reading the cookie DB
-// off disk.
-//
-// Primary path: Chrome Native Messaging → local host → per-service jars
-// (atlassian-cli install-host). Fallback: download atlassian-cookies.json for
-// `atlassian-cli import`.
+// Reads live cookies for the *current tab's origin* via chrome.cookies.getAll
+// (includes HttpOnly; sidesteps Chrome 127+ app-bound cookie encryption) and
+// hands them to the local native host (atlassian-cli install-host) which writes
+// per-service jars. No host fields, no Downloads.
 
 const $ = (id) => document.getElementById(id);
 
@@ -23,24 +16,23 @@ function setStatus(msg, cls) {
   el.className = cls || "";
 }
 
-// Accept a bare host ("yourco.atlassian.net") or a full URL; return a canonical
-// "https://host/" origin string, or null if it can't be parsed as http(s).
-function normalizeToUrl(input) {
-  const s = (input || "").trim();
-  if (!s) return null;
-  let u;
-  try {
-    u = new URL(s.includes("://") ? s : "https://" + s);
-  } catch {
-    return null;
+function setHostLabel(text, isError) {
+  const el = $("host");
+  el.textContent = "";
+  if (isError) {
+    el.textContent = text;
+    el.style.color = "#d93025";
+    return;
   }
-  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
-  return u.origin + "/";
+  el.style.color = "";
+  el.appendChild(document.createTextNode("Tab: "));
+  const strong = document.createElement("strong");
+  strong.textContent = text;
+  el.appendChild(strong);
 }
 
-// chrome.cookies.Cookie -> Playwright storage_state cookie shape. Session
-// cookies (no expirationDate) become expires:-1, matching the auth core's
-// `expires in (None, -1, 0)` session handling.
+// chrome.cookies.Cookie -> storage_state cookie shape. Session cookies
+// (no expirationDate) become expires:-1.
 function mapCookie(c) {
   const out = {
     name: c.name,
@@ -58,76 +50,45 @@ function mapCookie(c) {
 
 const dedupeKey = (c) => `${c.name}\t${c.domain}\t${c.path}`;
 
-async function loadSaved() {
-  const { jiraHost = "", confluenceHost = "" } = await chrome.storage.local.get([
-    "jiraHost",
-    "confluenceHost",
-  ]);
-  $("jira").value = jiraHost;
-  $("confluence").value = confluenceHost;
-}
-
-async function collectCookies() {
-  const jira = normalizeToUrl($("jira").value);
-  const conf = normalizeToUrl($("confluence").value);
-  const urls = [];
-  if (jira) urls.push(jira);
-  if (conf && conf !== jira) urls.push(conf); // one origin on Cloud (shared host)
-  if (!urls.length) {
-    throw new Error("Enter at least one valid Jira or Confluence host.");
+/** @returns {Promise<{ origin: string, host: string }>} */
+async function getActiveOrigin() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs && tabs[0];
+  if (!tab || !tab.url) {
+    throw new Error("No active tab URL. Open a Jira/Confluence page, then try again.");
   }
-
-  // Persist raw input so the fields are prefilled next time.
-  await chrome.storage.local.set({
-    jiraHost: $("jira").value.trim(),
-    confluenceHost: $("confluence").value.trim(),
-  });
-
-  // Request host permission only for the origins the user configured
-  // (least privilege; granted once, then remembered by Chrome).
-  const origins = urls.map((u) => u + "*");
-  let granted;
+  let u;
   try {
-    granted = await chrome.permissions.request({ origins });
-  } catch (e) {
-    throw new Error("Permission request failed: " + e.message);
+    u = new URL(tab.url);
+  } catch {
+    throw new Error("Could not parse the current tab URL.");
   }
-  if (!granted) {
-    throw new Error("Host permission denied — cannot read cookies for those hosts.");
-  }
-
-  const byKey = new Map();
-  for (const url of urls) {
-    let cookies;
-    try {
-      cookies = await chrome.cookies.getAll({ url });
-    } catch (e) {
-      throw new Error("cookies.getAll failed for " + url + ": " + e.message);
-    }
-    for (const c of cookies) byKey.set(dedupeKey(c), mapCookie(c));
-  }
-
-  const cookies = [...byKey.values()];
-  if (!cookies.length) {
+  if (u.protocol !== "https:" && u.protocol !== "http:") {
     throw new Error(
-      "No cookies found. Sign in to Jira/Confluence in this browser, then retry.",
+      "Current tab is not http(s). Switch to your Jira/Confluence site, then Sync.",
     );
   }
-  return { cookies, urls };
+  return { origin: u.origin + "/", host: u.hostname };
 }
 
-function downloadJson(cookies) {
-  const blob = new Blob([JSON.stringify({ cookies, origins: [] }, null, 2)], {
-    type: "application/json",
-  });
-  const href = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = href;
-  a.download = "atlassian-cookies.json";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(href), 5000);
+async function collectCookiesForOrigin(origin) {
+  // activeTab grants cookie access for the current tab's origin while the
+  // popup is open after the user clicked the action icon.
+  let cookies;
+  try {
+    cookies = await chrome.cookies.getAll({ url: origin });
+  } catch (e) {
+    throw new Error("cookies.getAll failed: " + e.message);
+  }
+  const byKey = new Map();
+  for (const c of cookies) byKey.set(dedupeKey(c), mapCookie(c));
+  const list = [...byKey.values()];
+  if (!list.length) {
+    throw new Error(
+      "No cookies for this tab. Sign into Jira/Confluence here, then Sync again.",
+    );
+  }
+  return list;
 }
 
 function sendNative(payload) {
@@ -163,9 +124,14 @@ function formatServiceLines(services) {
 }
 
 async function syncCookies() {
+  const btn = $("sync");
+  btn.disabled = true;
   setStatus("Working…");
   try {
-    const { cookies, urls } = await collectCookies();
+    const { origin, host } = await getActiveOrigin();
+    setHostLabel(host);
+    const cookies = await collectCookiesForOrigin(origin);
+
     let response;
     try {
       response = await sendNative({ cmd: "import", cookies });
@@ -173,9 +139,7 @@ async function syncCookies() {
       setStatus(
         "Native host not available (" +
           e.message +
-          ").\nRun: atlassian-cli install-host\n" +
-          "Or use “Download JSON only”, then:\n" +
-          "atlassian-cli import ~/Downloads/atlassian-cookies.json",
+          ").\nRun once:\n  atlassian-cli install-host\nThen reload this extension and Sync again.",
         "err",
       );
       return;
@@ -192,40 +156,34 @@ async function syncCookies() {
 
     const lines = formatServiceLines(response.services);
     if (response.ok || response.any_live) {
-      setStatus(
-        `Synced ${cookies.length} cookies from ${urls.length} host(s).\n${lines}`,
-        "ok",
-      );
+      setStatus(`Synced ${cookies.length} cookies from ${host}.\n${lines}`, "ok");
     } else {
       setStatus(
         `Imported cookies but session is NOT live.\n${lines}\n` +
           (response.error ? response.error + "\n" : "") +
-          "Sign into Jira/Confluence in this browser and Sync again.",
+          "Sign in on this tab and Sync again.",
         "err",
       );
     }
   } catch (e) {
     setStatus(e.message || String(e), "err");
+  } finally {
+    btn.disabled = false;
   }
 }
 
-async function downloadOnly() {
-  setStatus("Working…");
+async function showActiveHost() {
   try {
-    const { cookies, urls } = await collectCookies();
-    downloadJson(cookies);
-    setStatus(
-      `Exported ${cookies.length} cookies from ${urls.length} host(s) → atlassian-cookies.json\n` +
-        "Then: atlassian-cli import ~/Downloads/atlassian-cookies.json",
-      "ok",
-    );
+    const { host } = await getActiveOrigin();
+    setHostLabel(host);
+    $("sync").disabled = false;
   } catch (e) {
-    setStatus(e.message || String(e), "err");
+    setHostLabel(e.message || String(e), true);
+    $("sync").disabled = true;
   }
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  loadSaved();
   $("sync").addEventListener("click", syncCookies);
-  $("download").addEventListener("click", downloadOnly);
+  showActiveHost();
 });

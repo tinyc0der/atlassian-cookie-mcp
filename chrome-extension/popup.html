@@ -5,16 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Sync Atlassian cookies</title>
   <style>
-    body { font: 13px/1.4 -apple-system, system-ui, "Segoe UI", sans-serif; width: 320px; margin: 0; padding: 14px; color: #202124; }
-    h1 { font-size: 14px; margin: 0 0 4px; }
-    p.sub { margin: 0 0 10px; color: #5f6368; font-size: 12px; }
-    label { display: block; margin: 10px 0 2px; font-weight: 600; }
-    input { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #bbb; border-radius: 4px; }
-    button { margin-top: 10px; width: 100%; padding: 9px; font-weight: 600; border: 0; border-radius: 4px; cursor: pointer; }
-    button.primary { background: #1868db; color: #fff; }
-    button.primary:hover { background: #1558c0; }
-    button.secondary { background: #e8eaed; color: #202124; }
-    button.secondary:hover { background: #dadce0; }
+    body { font: 13px/1.4 -apple-system, system-ui, "Segoe UI", sans-serif; width: 280px; margin: 0; padding: 14px; color: #202124; }
+    h1 { font-size: 14px; margin: 0 0 6px; }
+    #host { margin: 0 0 12px; color: #5f6368; font-size: 12px; word-break: break-all; }
+    #host strong { color: #202124; font-weight: 600; }
+    button { width: 100%; padding: 9px; font-weight: 600; border: 0; border-radius: 4px; cursor: pointer; background: #1868db; color: #fff; }
+    button:hover { background: #1558c0; }
+    button:disabled { background: #9aa0a6; cursor: not-allowed; }
     #status { margin-top: 10px; white-space: pre-wrap; font-size: 12px; min-height: 16px; }
     #status.ok { color: #188038; }
     #status.err { color: #d93025; }
@@ -24,22 +21,13 @@
 </head>
 <body>
   <h1>Sync Atlassian cookies</h1>
-  <p class="sub">Reads your live Jira/Confluence session (including HttpOnly cookies) and syncs them to local tools via the native host — or downloads a JSON fallback.</p>
-
-  <label for="jira">Jira host</label>
-  <input id="jira" placeholder="https://yourco.atlassian.net" autocomplete="off" spellcheck="false" />
-
-  <label for="confluence">Confluence host</label>
-  <input id="confluence" placeholder="https://yourco.atlassian.net" autocomplete="off" spellcheck="false" />
-
-  <button id="sync" class="primary">Sync cookies</button>
-  <button id="download" class="secondary">Download JSON only</button>
+  <p id="host">Detecting tab…</p>
+  <button id="sync">Sync cookies</button>
   <div id="status"></div>
-
   <div class="hint">
-    One-time: <code>atlassian-cli install-host</code> (with <code>JIRA_URL</code> / <code>CONFLUENCE_URL</code> set), then reload this unpacked extension.
+    Open a Jira/Confluence tab, then Sync. One-time setup:
+    <code>atlassian-cli install-host</code>
   </div>
-
   <script src="popup.js"></script>
 </body>
 </html>

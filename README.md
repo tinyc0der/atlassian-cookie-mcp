@@ -16,7 +16,7 @@ MCP server that wraps the upstream [mcp-atlassian](https://github.com/sooperset/
 
 Capturing cookies and serving data are **separate**, and there is **no browser automation** anywhere — this is what keeps the MCP server from hanging:
 
-1. **Capture cookies with the Chrome extension.** Load `chrome-extension/` unpacked. After a one-time `atlassian-cli install-host`, click **Sync cookies** — the extension hands cookies to a local Native Messaging host that writes per-service jars (no Downloads). Fallback: **Download JSON only** + `atlassian-cli import`.
+1. **Capture cookies with the Chrome extension.** Load `chrome-extension/` unpacked. After a one-time `atlassian-cli install-host`, open a Jira/Confluence tab and click **Sync cookies** — cookies for the current tab’s domain go to a local Native Messaging host that writes per-service jars.
 2. **The MCP server serves data only.** It reads the saved cookies via a custom `requests.Session` subclass and never opens a browser. On a missing/expired session it fails fast with an `AuthRequiredError` telling you to re-sync — it does **not** block.
 
 > ⚠️ Earlier versions launched a Playwright login browser from inside the server. Because the server is detached and async, that blocked tool calls for minutes (often forever) and could deadlock Playwright's sync API on the event loop. Moving capture to the extension removes that failure mode — and removes the need to read Chrome's on-disk cookie DB, which Chrome 127+ "app-bound" encryption blocks.
@@ -32,7 +32,7 @@ The server monkey-patches `JiraClient` and `ConfluenceClient` constructors in `m
 | `atlassian_cli.py` + `atlassian-cli` | Command-line front-end (`install-host`, `import`, Jira/Confluence get/search). See [`AGENT_USAGE.md`](AGENT_USAGE.md) |
 | `atlassian_cookie_import.py` | Shared cookie → jar import + liveness probe (CLI and native host) |
 | `atlassian_native_host.py` + `atlassian-native-host` | Chrome Native Messaging host for one-click Sync |
-| `chrome-extension/` | Manifest V3 extension: Sync via native host, or download JSON — see [`chrome-extension/README.md`](chrome-extension/README.md) |
+| `chrome-extension/` | Manifest V3 extension: Sync current-tab cookies via native host — see [`chrome-extension/README.md`](chrome-extension/README.md) |
 | `run-atlassian-browser-mcp.sh` | MCP launcher: creates venv, installs deps via `uv`, runs compatibility check, starts server |
 | `pyproject.toml` | Dependency pins |
 
@@ -47,7 +47,7 @@ re-prompt:
    (registers the native host; freezes URLs for Chrome-launched processes).
 2. `chrome://extensions` → enable **Developer mode** → **Load unpacked** →
    select `chrome-extension/` → reload after install-host.
-3. Click the extension, enter hosts, click **Sync cookies**.
+3. Open a Jira/Confluence tab, click the extension → **Sync cookies**.
 
 Cookie jars are **never auto-deleted** on an auth failure. Jira and Confluence
 keep separate jars; on Atlassian Cloud they share one host, so a single sync
@@ -61,9 +61,7 @@ export JIRA_URL="https://yourco.atlassian.net"
 export CONFLUENCE_URL="https://yourco.atlassian.net"   # Cloud: same host
 
 ./atlassian-cli install-host                               # once per machine
-# then: extension → Sync cookies
-# fallback:
-./atlassian-cli import ~/Downloads/atlassian-cookies.json
+# then: open Jira/Confluence tab → extension → Sync cookies
 
 ./atlassian-cli jira get PROJ-123 --comments
 ./atlassian-cli jira search 'project = PROJ AND status = "In Progress"'

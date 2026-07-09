@@ -11,7 +11,7 @@ MCP server wrapping upstream [mcp-atlassian](https://github.com/sooperset/mcp-at
 - `atlassian_cli.py` + `atlassian-cli` — Command-line front-end over the same auth core (`install-host`, `import`, Jira/Confluence get/search). Preferred for agents and scripting; no MCP transport involved. See `AGENT_USAGE.md`.
 - `atlassian_cookie_import.py` — Shared import + probe used by CLI and native host.
 - `atlassian_native_host.py` + `atlassian-native-host` — Chrome Native Messaging host for one-click extension **Sync** (no Downloads).
-- `chrome-extension/` — Manifest V3 Chrome extension. Reads live cookies via `chrome.cookies.getAll` and Syncs them via the native host (or downloads JSON for `import`). The only way to seed cookies (Chrome 127+ app-bound cookies can't be read off disk, and no browser is ever driven).
+- `chrome-extension/` — Manifest V3 Chrome extension. Reads live cookies for the **current tab** via `chrome.cookies.getAll` and Syncs them via the native host. The only way to seed cookies (Chrome 127+ app-bound cookies can't be read off disk, and no browser is ever driven).
 - `run-atlassian-browser-mcp.sh` — MCP launcher: creates venv via `uv`, installs deps, runs upstream compatibility check, starts server.
 
 ## ⚠️ The server NEVER opens a browser (nothing here does)
@@ -20,10 +20,9 @@ Capturing cookies and serving REST calls are **separate jobs**, and **no part of
 this tool opens a browser or drives Playwright** — Playwright has been removed
 entirely.
 
-- **Capturing cookies is out-of-band**: the user Syncs cookies with the Chrome
-  extension (`chrome-extension/`) via the native host (`install-host`), or
-  downloads JSON and runs `atlassian-cli import`. Interactive login is not
-  something this tool performs.
+- **Capturing cookies is out-of-band**: the user opens a Jira/Confluence tab and
+  Syncs with the Chrome extension (`chrome-extension/`) via the native host
+  (`install-host`). Interactive login is not something this tool performs.
 - **Serving is fast, stateless HTTP**: `BrowserCookieSession` reads the saved
   cookie jar and, on a cache miss or 401, raises `AuthRequiredError`
   **immediately** ("export cookies and run `atlassian-cli import`") instead of
@@ -51,11 +50,10 @@ extension eliminates that hang class entirely.
 Re-entering corporate username/password + MFA on every run must be avoided; the
 whole point is a **persistent, reusable session**. How it stays reliable:
 
-1. **Sync from real Chrome with the extension.** `chrome-extension/` reads the
-   live cookie store via `chrome.cookies.getAll` (plaintext, incl. HttpOnly), so
-   it reuses whatever SSO session Chrome already has — no password, no MFA
-   re-prompt. Preferred path: **Sync** → native host → jars (after
-   `install-host`). Fallback: download JSON + `import`. This is the supported
+1. **Sync from real Chrome with the extension.** Open a Jira/Confluence tab;
+   the extension reads that origin’s cookies via `chrome.cookies.getAll`
+   (plaintext, incl. HttpOnly) — no password, no MFA re-prompt. Path:
+   **Sync** → native host → jars (after `install-host`). This is the supported
    path because **Chrome 127+ "app-bound" cookies cannot be decrypted off disk**.
 2. **NEVER delete the cookie jars on an auth failure.** On re-auth, only the
    short-lived per-service cache (`.atlassian-browser-state-<svc>.json`) is

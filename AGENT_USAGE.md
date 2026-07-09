@@ -11,11 +11,9 @@ imported.
 ## How auth resolves (the order — this is the whole design)
 
 1. **Saved cookie jar** still valid → used immediately, no work.
-2. **Browser-extension Sync** (preferred) — after a one-time
-   `atlassian-cli install-host`, the user clicks **Sync cookies** in the
-   extension. Cookies go Chrome → native host → per-service jars (no Downloads).
-3. **JSON fallback** — extension **Download JSON only**, then
-   `atlassian-cli import ~/Downloads/atlassian-cookies.json`.
+2. **Browser-extension Sync** — after a one-time `atlassian-cli install-host`,
+   open a Jira/Confluence tab and click **Sync cookies**. Cookies for the
+   **current tab’s origin** go Chrome → native host → per-service jars.
 
 The extension reads cookies from Chrome's live cookie store (plaintext, incl.
 HttpOnly) via `chrome.cookies.getAll`, so it is immune to the Chrome 127+
@@ -23,7 +21,7 @@ app-bound-encryption problem. See
 [`chrome-extension/README.md`](chrome-extension/README.md).
 
 The MCP **server never opens a window**: on a missing/expired jar it raises
-"sync cookies / import" instead of hanging.
+"sync cookies" instead of hanging.
 
 ## Why this exists
 
@@ -63,14 +61,9 @@ Confluence URLs, so the bare tenant host works.
 2. Load the extension: open `chrome://extensions`, enable **Developer mode**,
    click **Load unpacked**, select `chrome-extension/`, then **Reload** after
    install-host (expected id `eiknaofpjmgjacfiihcmeifjmepobkla`).
-3. Click the extension → enter Jira/Confluence hosts → **Sync cookies**.
-   The native host writes jars and probes live status.
-
-**Fallback** (no native host): **Download JSON only**, then:
-
-```bash
-./atlassian-cli import ~/Downloads/atlassian-cookies.json
-```
+3. Open a Jira/Confluence tab → click the extension → **Sync cookies**.
+   Cookies come from the **current tab’s domain**; the native host writes jars
+   and probes live status.
 
 Re-**Sync** whenever the session expires.
 
@@ -93,13 +86,9 @@ Re-**Sync** whenever the session expires.
 ## If a command says it can't authenticate
 
 The saved jar is missing or the session expired. Sign into Jira/Confluence in
-Chrome if needed, then click **Sync cookies** in the extension. Fallback:
+Chrome if needed, open a page on that host, then click **Sync cookies**.
 
-```bash
-./atlassian-cli import ~/Downloads/atlassian-cookies.json
-```
-
-Sync/`import` probes the REST API and reports `HTTP 200 (live)` on success, or
+Sync probes the REST API and reports `HTTP 200 (live)` on success, or
 "NOT live" if the cookies are already expired.
 
 ## Files (all git-ignored, local only)
@@ -109,7 +98,7 @@ Sync/`import` probes the REST API and reports `HTTP 200 (live)` on success, or
 | `.atlassian-browser-state-jira.json` | Saved Jira cookie jar |
 | `.atlassian-browser-state-confluence.json` | Saved Confluence cookie jar |
 | `.atlassian-native-host-env.json` | URLs for Chrome-launched native host (from `install-host`) |
-| `atlassian-cookies.json` (in ~/Downloads) | Optional JSON export — removed automatically by `import` after jars are written |
+
 
 ## Env vars
 
@@ -127,9 +116,8 @@ Sync/`import` probes the REST API and reports `HTTP 200 (live)` on success, or
   `updated >= -7d`). An unbounded `order by …` alone returns a clear 400.
 - **Confluence Cloud** URLs get `/wiki` appended automatically; Server/DC hosts
   are left as-is.
-- Prefer extension **Sync** (native messaging). A downloaded
-  `atlassian-cookies.json` holds **live session cookies** — treat it like a
-  password; `import` deletes it automatically after writing the jars.
+- Prefer extension **Sync** (native messaging). Cookie jars hold live session
+  credentials — never commit them.
 - Jira and Confluence keep **separate** cookie jars. On Cloud they share one host,
   so one export covers both; `import` writes both jars.
 - Never commit the `.atlassian-browser-*` files or `atlassian-cookies*.json` —

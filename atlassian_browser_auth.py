@@ -40,10 +40,9 @@ class AuthRequiredError(RuntimeError):
     def __init__(self, service: ServiceName) -> None:
         self.service = service
         super().__init__(
-            f"Not authenticated for {service}. Sync cookies with the Atlassian "
-            f"Cookie Exporter browser extension (after `atlassian-cli install-host`), "
-            f"or run `atlassian-cli import <file>` from a JSON export. The server "
-            f"never opens a browser itself."
+            f"Not authenticated for {service}. Open a Jira/Confluence tab and "
+            f"Sync cookies with the browser extension (after "
+            f"`atlassian-cli install-host`). The server never opens a browser itself."
         )
 
 
