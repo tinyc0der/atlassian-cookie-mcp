@@ -56,28 +56,35 @@ Then **reload** the unpacked extension on `chrome://extensions`.
 
 1. Sign into Jira or Confluence in Chrome.
 2. Stay on a page on that host (e.g. your site’s issue list or a Confluence page).
-3. Click the extension → **Sync cookies**.
+3. Click the extension → **Sync cookies** (manual), and/or enable  
+   **Auto-sync when session cookies change** (opt-in).
 
-The extension **only** reads cookies when the tab is a Jira/Confluence site:
+### Manual Sync
 
-- Hosts from `JIRA_URL` / `CONFLUENCE_URL` (via `install-host`), or
-- Known Atlassian Cloud hosts (`*.atlassian.net`, `*.jira.com`)
+Reads cookies for the **current tab’s domain** only when it is a Jira/Confluence
+site (configured hosts or known Cloud hosts). Other tabs are rejected before any
+cookie is read. The native host re-checks `page_host` before writing jars.
 
-Other tabs (Google, email, etc.) are rejected before any cookie is read. Cookie
-domains are also filtered to the page host. The native host re-checks `page_host`
-before writing jars.
+On Atlassian Cloud, one Sync covers both Jira and Confluence jars. On Server/DC
+with separate hosts, open each product and Sync once.
 
-On Atlassian Cloud, Jira and Confluence share one host — one Sync covers both
-(if `JIRA_URL` / `CONFLUENCE_URL` point at that tenant). On Server/DC with
-separate hosts, open each product and Sync once.
+### Auto-sync (opt-in)
 
-Re-sync whenever the session expires.
+When enabled, a background service worker listens for `chrome.cookies.onChanged`
+on **session** cookies only (e.g. `tenant.session.token`, `JSESSIONID` — not XSRF
+churn), debounces ~3s, and pushes cookies to the native host.
+
+- **Default: off**
+- Chrome must stay running with the extension loaded
+- Requires `install-host` (same as manual Sync)
+- Cloud hosts are covered by declared permissions; custom DC hosts request
+  optional host permission when you enable the toggle
 
 ## Permissions
 
-- `cookies`, `activeTab`, `nativeMessaging`.
-- No host list to configure: cookie access is scoped to the tab you invoke the
-  extension on (`activeTab`).
+- `cookies`, `activeTab`, `nativeMessaging`, `storage`
+- `host_permissions` for `*.atlassian.net` / `*.jira.com` (auto-sync + background reads)
+- `optional_host_permissions` for custom Server/DC hosts
 
 ## Security
 

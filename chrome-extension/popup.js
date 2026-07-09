@@ -1,13 +1,16 @@
-// Atlassian Cookie Sync — popup logic.
-//
-// Reads live cookies only when the active tab is a Jira/Confluence host
-// (configured via install-host, or known Atlassian Cloud). Hands them to the
-// native host which writes per-service jars.
+// Atlassian Cookie Sync — popup UI (manual Sync + auto-sync toggle).
+
+import {
+  ensureHostPermissions,
+  fetchAllowedHosts,
+  formatServiceLines,
+  getAutoSyncEnabled,
+  importCookiesForHost,
+  isAllowedProductHost,
+  setAutoSyncEnabled,
+} from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
-
-// Must match atlassian_native_host.NATIVE_HOST_NAME / install-host registration.
-const NATIVE_HOST = "com.atlassian_browser_mcp.cookie_host";
 
 function setStatus(msg, cls) {
   const el = $("status");
@@ -30,96 +33,6 @@ function setHostLabel(text, isError) {
   el.appendChild(strong);
 }
 
-// chrome.cookies.Cookie -> storage_state cookie shape. Session cookies
-// (no expirationDate) become expires:-1.
-function mapCookie(c) {
-  const out = {
-    name: c.name,
-    value: c.value,
-    domain: c.domain,
-    path: c.path || "/",
-    secure: !!c.secure,
-    httpOnly: !!c.httpOnly,
-    expires: c.session || !c.expirationDate ? -1 : Math.floor(c.expirationDate),
-  };
-  const ss = { no_restriction: "None", lax: "Lax", strict: "Strict" }[c.sameSite];
-  if (ss) out.sameSite = ss;
-  return out;
-}
-
-const dedupeKey = (c) => `${c.name}\t${c.domain}\t${c.path}`;
-
-function normalizeHost(host) {
-  return (host || "").toLowerCase().replace(/^\./, "");
-}
-
-function hostnamesMatch(a, b) {
-  a = normalizeHost(a);
-  b = normalizeHost(b);
-  if (!a || !b) return false;
-  return a === b || a.endsWith("." + b) || b.endsWith("." + a);
-}
-
-/** Known Atlassian Cloud product hosts (custom DC must be in install-host list). */
-function isKnownAtlassianCloudHost(host) {
-  const h = normalizeHost(host);
-  return (
-    h === "atlassian.net" ||
-    h.endsWith(".atlassian.net") ||
-    h === "jira.com" ||
-    h.endsWith(".jira.com")
-  );
-}
-
-function isAllowedProductHost(host, allowedHosts) {
-  const h = normalizeHost(host);
-  if (!h) return false;
-  if (Array.isArray(allowedHosts) && allowedHosts.length) {
-    for (const a of allowedHosts) {
-      if (hostnamesMatch(h, a)) return true;
-    }
-  }
-  return isKnownAtlassianCloudHost(h);
-}
-
-/** Cookie domain belongs to the page host (incl. parent-domain cookies). */
-function cookieBelongsToPageHost(cookie, pageHost) {
-  const d = normalizeHost(cookie.domain || "");
-  const h = normalizeHost(pageHost);
-  if (!d || !h) return false;
-  return h === d || h.endsWith("." + d) || d.endsWith("." + h);
-}
-
-function sendNative(payload) {
-  return new Promise((resolve, reject) => {
-    try {
-      chrome.runtime.sendNativeMessage(NATIVE_HOST, payload, (response) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
-        resolve(response);
-      });
-    } catch (e) {
-      reject(e);
-    }
-  });
-}
-
-/** @returns {Promise<string[]>} */
-async function fetchAllowedHosts() {
-  try {
-    const reply = await sendNative({ cmd: "ping" });
-    if (reply && Array.isArray(reply.allowed_hosts)) {
-      return reply.allowed_hosts.map(normalizeHost).filter(Boolean);
-    }
-  } catch {
-    // Host not installed yet — fall back to Cloud hostname heuristics only.
-  }
-  return [];
-}
-
-/** @returns {Promise<{ origin: string, host: string, url: string }>} */
 async function getActiveOrigin() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const tab = tabs && tabs[0];
@@ -140,10 +53,6 @@ async function getActiveOrigin() {
   return { origin: u.origin + "/", host: u.hostname, url: tab.url };
 }
 
-/**
- * Ensure tab is Jira/Confluence before reading any cookies.
- * @returns {Promise<{ origin: string, host: string, allowedHosts: string[] }>}
- */
 async function requireProductTab() {
   const { origin, host } = await getActiveOrigin();
   const allowedHosts = await fetchAllowedHosts();
@@ -160,72 +69,14 @@ async function requireProductTab() {
   return { origin, host, allowedHosts };
 }
 
-async function collectCookiesForOrigin(origin, pageHost) {
-  // activeTab grants cookie access for the current tab's origin while the
-  // popup is open after the user clicked the action icon.
-  let cookies;
-  try {
-    cookies = await chrome.cookies.getAll({ url: origin });
-  } catch (e) {
-    throw new Error("cookies.getAll failed: " + e.message);
-  }
-  const byKey = new Map();
-  for (const c of cookies) {
-    if (!cookieBelongsToPageHost(c, pageHost)) continue;
-    byKey.set(dedupeKey(c), mapCookie(c));
-  }
-  const list = [...byKey.values()];
-  if (!list.length) {
-    throw new Error(
-      "No cookies for this Jira/Confluence tab. Sign in here, then Sync again.",
-    );
-  }
-  return list;
-}
-
-function formatServiceLines(services) {
-  if (!services || typeof services !== "object") return "";
-  const lines = [];
-  for (const [name, info] of Object.entries(services)) {
-    if (!info) continue;
-    if (info.skipped) {
-      lines.push(`${name}: skipped (${info.message || "no match"})`);
-      continue;
-    }
-    const st = info.status == null ? "?" : info.status;
-    const live = st === 200 ? "live" : "NOT live";
-    lines.push(`${name}: ${info.matched || 0} cookies → HTTP ${st} (${live})`);
-  }
-  return lines.join("\n");
-}
-
 async function syncCookies() {
   const btn = $("sync");
   btn.disabled = true;
   setStatus("Working…");
   try {
-    // Gate *before* reading cookies so random sites never get scraped.
-    const { origin, host } = await requireProductTab();
+    const { host } = await requireProductTab();
     setHostLabel(host);
-    const cookies = await collectCookiesForOrigin(origin, host);
-
-    let response;
-    try {
-      response = await sendNative({
-        cmd: "import",
-        cookies,
-        page_host: host,
-        page_origin: origin,
-      });
-    } catch (e) {
-      setStatus(
-        "Native host not available (" +
-          e.message +
-          ").\nRun once:\n  atlassian-cli install-host\nThen reload this extension and Sync again.",
-        "err",
-      );
-      return;
-    }
+    const { response, cookies } = await importCookiesForHost(host);
 
     if (!response || typeof response !== "object") {
       setStatus("Native host returned an empty response.", "err");
@@ -248,7 +99,17 @@ async function syncCookies() {
       );
     }
   } catch (e) {
-    setStatus(e.message || String(e), "err");
+    const msg = e.message || String(e);
+    if (/native|host|Specified native/i.test(msg)) {
+      setStatus(
+        "Native host not available (" +
+          msg +
+          ").\nRun once:\n  atlassian-cli install-host\nThen reload this extension and Sync again.",
+        "err",
+      );
+    } else {
+      setStatus(msg, "err");
+    }
   } finally {
     btn.disabled = false;
   }
@@ -265,7 +126,65 @@ async function showActiveHost() {
   }
 }
 
+async function showLastAutoSync() {
+  const { lastAutoSync } = await chrome.storage.local.get("lastAutoSync");
+  const el = $("lastAuto");
+  if (!el) return;
+  if (!lastAutoSync || !lastAutoSync.at) {
+    el.textContent = "";
+    return;
+  }
+  const ago = Math.round((Date.now() - lastAutoSync.at) / 1000);
+  const when =
+    ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.round(ago / 60)}m ago` : "earlier";
+  if (lastAutoSync.ok) {
+    el.textContent = `Last auto-sync: ${lastAutoSync.host} OK (${when})`;
+    el.className = "last ok";
+  } else {
+    el.textContent = `Last auto-sync failed: ${lastAutoSync.error || "unknown"} (${when})`;
+    el.className = "last err";
+  }
+}
+
+async function loadAutoSyncToggle() {
+  const enabled = await getAutoSyncEnabled();
+  $("autoSync").checked = enabled;
+}
+
+async function onAutoSyncToggle() {
+  const want = $("autoSync").checked;
+  if (want) {
+    // Request optional permissions for custom DC hosts from install-host.
+    const allowed = await fetchAllowedHosts();
+    const granted = await ensureHostPermissions(allowed);
+    if (!granted && allowed.some((h) => !h.endsWith(".atlassian.net") && !h.endsWith(".jira.com"))) {
+      $("autoSync").checked = false;
+      setStatus(
+        "Host permission denied for custom Jira/Confluence host. Allow it to enable auto-sync.",
+        "err",
+      );
+      return;
+    }
+    // Smoke-check native host.
+    try {
+      await fetchAllowedHosts();
+    } catch {
+      /* ignore */
+    }
+  }
+  await setAutoSyncEnabled(want);
+  setStatus(
+    want
+      ? "Auto-sync on. Session cookie changes will update local jars (Chrome must stay open)."
+      : "Auto-sync off. Use Sync cookies manually.",
+    want ? "ok" : "",
+  );
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   $("sync").addEventListener("click", syncCookies);
+  $("autoSync").addEventListener("change", onAutoSyncToggle);
+  loadAutoSyncToggle();
   showActiveHost();
+  showLastAutoSync();
 });

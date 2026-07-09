@@ -63,9 +63,10 @@ Confluence URLs, so the bare tenant host works.
    install-host (expected id `eiknaofpjmgjacfiihcmeifjmepobkla`).
 3. Open a Jira/Confluence tab → click the extension → **Sync cookies**.
    Cookies come from the **current tab’s domain**; the native host writes jars
-   and probes live status.
+   and probes live status. Optional: enable **Auto-sync when session cookies
+   change** so jars refresh without clicking (Chrome must stay open).
 
-Re-**Sync** whenever the session expires.
+Re-**Sync** (or rely on auto-sync) whenever the session expires.
 
 ## Daily commands (no browser opens)
 
