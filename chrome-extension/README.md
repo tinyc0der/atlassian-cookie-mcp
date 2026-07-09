@@ -58,8 +58,14 @@ Then **reload** the unpacked extension on `chrome://extensions`.
 2. Stay on a page on that host (e.g. your site’s issue list or a Confluence page).
 3. Click the extension → **Sync cookies**.
 
-The extension sends cookies for the **current tab’s domain** to the native host,
-which writes the per-service jars and probes the REST API.
+The extension **only** reads cookies when the tab is a Jira/Confluence site:
+
+- Hosts from `JIRA_URL` / `CONFLUENCE_URL` (via `install-host`), or
+- Known Atlassian Cloud hosts (`*.atlassian.net`, `*.jira.com`)
+
+Other tabs (Google, email, etc.) are rejected before any cookie is read. Cookie
+domains are also filtered to the page host. The native host re-checks `page_host`
+before writing jars.
 
 On Atlassian Cloud, Jira and Confluence share one host — one Sync covers both
 (if `JIRA_URL` / `CONFLUENCE_URL` point at that tenant). On Server/DC with

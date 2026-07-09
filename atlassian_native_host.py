@@ -20,6 +20,7 @@ import struct
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from atlassian_cookie_import import import_cookies
 
@@ -270,11 +271,87 @@ def write_native_message(message: dict[str, Any], stdout=None) -> None:
     out.flush()
 
 
+def _hostname_from_url(url: str) -> str | None:
+    if not url or not str(url).strip():
+        return None
+    raw = str(url).strip()
+    if "://" not in raw:
+        raw = "https://" + raw
+    try:
+        host = urlparse(raw).hostname
+    except ValueError:
+        return None
+    return host.lower() if host else None
+
+
+def configured_product_hosts() -> list[str]:
+    """Hostnames from JIRA_URL / CONFLUENCE_URL (env or host-env file)."""
+    hosts: list[str] = []
+    for key in ("JIRA_URL", "CONFLUENCE_URL"):
+        h = _hostname_from_url(os.environ.get(key, ""))
+        if h and h not in hosts:
+            hosts.append(h)
+    return hosts
+
+
+def hostnames_match(page_host: str, allowed_host: str) -> bool:
+    """True if page_host is allowed_host or a subdomain of it (or vice versa)."""
+    a = (page_host or "").lower().lstrip(".")
+    b = (allowed_host or "").lower().lstrip(".")
+    if not a or not b:
+        return False
+    return a == b or a.endswith("." + b) or b.endswith("." + a)
+
+
+def is_known_atlassian_cloud_host(host: str) -> bool:
+    """Well-known Atlassian Cloud product hostnames (no custom DC domains)."""
+    h = (host or "").lower().lstrip(".")
+    if not h:
+        return False
+    return (
+        h == "atlassian.net"
+        or h.endswith(".atlassian.net")
+        or h == "jira.com"
+        or h.endswith(".jira.com")
+    )
+
+
+def is_allowed_product_host(page_host: str, allowed: list[str] | None = None) -> bool:
+    """Whether a browser tab host is treated as Jira/Confluence for Sync.
+
+    Prefer configured JIRA_URL/CONFLUENCE_URL hosts; also accept Atlassian Cloud
+    hostnames. Custom Server/DC hosts must appear in the configured list
+    (via install-host).
+    """
+    h = (page_host or "").lower().lstrip(".")
+    if not h:
+        return False
+    allowed = list(allowed) if allowed is not None else configured_product_hosts()
+    for a in allowed:
+        if hostnames_match(h, a):
+            return True
+    return is_known_atlassian_cloud_host(h)
+
+
+def page_host_from_message(msg: dict[str, Any]) -> str | None:
+    """Extract page hostname from extension message fields."""
+    for key in ("page_host", "host"):
+        val = msg.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip().lower().lstrip(".")
+    origin = msg.get("page_origin") or msg.get("origin")
+    if isinstance(origin, str) and origin.strip():
+        return _hostname_from_url(origin)
+    return None
+
+
 def handle_message(msg: dict[str, Any]) -> dict[str, Any]:
     """Dispatch one extension message to import_cookies."""
     cmd = msg.get("cmd") or msg.get("command") or "import"
     if cmd not in ("import", "sync", "ping"):
         return {"ok": False, "error": f"unknown cmd: {cmd}"}
+
+    allowed = configured_product_hosts()
 
     if cmd == "ping":
         return {
@@ -282,6 +359,7 @@ def handle_message(msg: dict[str, Any]) -> dict[str, Any]:
             "host_name": NATIVE_HOST_NAME,
             "extension_id": EXTENSION_ID,
             "env_loaded": host_env_path().is_file(),
+            "allowed_hosts": allowed,
         }
 
     cookies = msg.get("cookies")
@@ -292,10 +370,37 @@ def handle_message(msg: dict[str, Any]) -> dict[str, Any]:
     if service is not None and service not in ("jira", "confluence"):
         return {"ok": False, "error": f"invalid service: {service}"}
 
+    # Require the tab to be a configured Jira/Confluence (or Cloud) host so a
+    # compromised/mis-aimed extension cannot push arbitrary-site cookies.
+    page_host = page_host_from_message(msg)
+    if not page_host:
+        return {
+            "ok": False,
+            "error": (
+                "missing page_host — open a Jira or Confluence tab and Sync again"
+            ),
+        }
+    if not is_allowed_product_host(page_host, allowed):
+        hint = (
+            f"allowed: {', '.join(allowed)}"
+            if allowed
+            else "run atlassian-cli install-host with JIRA_URL/CONFLUENCE_URL"
+        )
+        return {
+            "ok": False,
+            "error": (
+                f"refusing cookies from {page_host!r} — not a Jira/Confluence "
+                f"host ({hint})"
+            ),
+            "page_host": page_host,
+            "allowed_hosts": allowed,
+        }
+
     result = import_cookies(cookies, service=service)
     payload = result.to_dict()
     # Never echo cookies back.
     payload["host"] = NATIVE_HOST_NAME
+    payload["page_host"] = page_host
     return payload
 
 

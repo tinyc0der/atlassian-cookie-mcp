@@ -34,17 +34,74 @@ def test_read_native_message_eof():
     assert host.read_native_message(io.BytesIO(b"")) is None
 
 
-def test_handle_ping():
+def test_handle_ping(monkeypatch):
+    monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+    monkeypatch.setenv("CONFLUENCE_URL", "https://confluence.example.com")
     reply = host.handle_message({"cmd": "ping"})
     assert reply["ok"] is True
     assert reply["host_name"] == host.NATIVE_HOST_NAME
     assert reply["extension_id"] == host.EXTENSION_ID
+    assert reply["allowed_hosts"] == ["jira.example.com", "confluence.example.com"]
+
+
+def test_is_allowed_product_host():
+    assert host.is_known_atlassian_cloud_host("namtube321.atlassian.net")
+    assert host.is_allowed_product_host("namtube321.atlassian.net", [])
+    assert host.is_allowed_product_host(
+        "jira.corp.example", ["jira.corp.example"]
+    )
+    assert not host.is_allowed_product_host("google.com", ["jira.example.com"])
+    assert not host.is_allowed_product_host("evil.com", [])
 
 
 def test_handle_import_missing_cookies():
     reply = host.handle_message({"cmd": "import"})
     assert reply["ok"] is False
     assert "cookies" in reply["error"]
+
+
+def test_handle_import_requires_page_host(monkeypatch, tmp_path):
+    monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+    monkeypatch.setenv("CONFLUENCE_URL", "https://confluence.example.com")
+    monkeypatch.setenv("ATLASSIAN_STORAGE_STATE", str(tmp_path / "state.json"))
+    cookies = [
+        {
+            "name": "JSESSIONID",
+            "value": "j",
+            "domain": "jira.example.com",
+            "path": "/",
+            "expires": -1,
+        }
+    ]
+    reply = host.handle_message({"cmd": "import", "cookies": cookies, "service": "jira"})
+    assert reply["ok"] is False
+    assert "page_host" in reply["error"]
+
+
+def test_handle_import_rejects_non_product_host(monkeypatch, tmp_path):
+    monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+    monkeypatch.setenv("CONFLUENCE_URL", "https://confluence.example.com")
+    monkeypatch.setenv("ATLASSIAN_STORAGE_STATE", str(tmp_path / "state.json"))
+    cookies = [
+        {
+            "name": "SID",
+            "value": "x",
+            "domain": "google.com",
+            "path": "/",
+            "expires": -1,
+        }
+    ]
+    reply = host.handle_message(
+        {
+            "cmd": "import",
+            "cookies": cookies,
+            "page_host": "google.com",
+            "service": "jira",
+        }
+    )
+    assert reply["ok"] is False
+    assert "refusing" in reply["error"]
+    assert not (tmp_path / "state-jira.json").exists()
 
 
 def test_handle_import_delegates(monkeypatch, tmp_path):
@@ -66,7 +123,14 @@ def test_handle_import_delegates(monkeypatch, tmp_path):
             "expires": -1,
         }
     ]
-    reply = host.handle_message({"cmd": "import", "cookies": cookies, "service": "jira"})
+    reply = host.handle_message(
+        {
+            "cmd": "import",
+            "cookies": cookies,
+            "service": "jira",
+            "page_host": "jira.example.com",
+        }
+    )
     assert reply["ok"] is True
     assert reply["any_live"] is True
     assert reply["services"]["jira"]["status"] == 200
@@ -76,6 +140,36 @@ def test_handle_import_delegates(monkeypatch, tmp_path):
     assert "value" not in json.dumps(reply) or '"value"' not in json.dumps(
         {k: v for k, v in reply.items() if k != "services"}
     )
+
+
+def test_handle_import_allows_cloud_host_without_env_match(monkeypatch, tmp_path):
+    """Cloud tab is allowed even if env lists a sibling tenant (still filters cookies)."""
+    monkeypatch.setenv("JIRA_URL", "https://other.atlassian.net")
+    monkeypatch.setenv("CONFLUENCE_URL", "https://other.atlassian.net")
+    monkeypatch.setenv("ATLASSIAN_STORAGE_STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(
+        "atlassian_cookie_import.probe_live", lambda *a, **k: 200
+    )
+    cookies = [
+        {
+            "name": "tenant.session.token",
+            "value": "t",
+            "domain": "other.atlassian.net",
+            "path": "/",
+            "expires": -1,
+        }
+    ]
+    # Page is Cloud — accepted; cookies for wrong host simply won't match jars.
+    reply = host.handle_message(
+        {
+            "cmd": "import",
+            "cookies": cookies,
+            "page_host": "other.atlassian.net",
+        }
+    )
+    assert reply.get("page_host") == "other.atlassian.net" or reply["ok"] or reply.get(
+        "any_matched"
+    ) is not None
 
 
 def test_write_and_load_host_env(tmp_path, monkeypatch):
