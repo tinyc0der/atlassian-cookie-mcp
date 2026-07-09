@@ -27,8 +27,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
+from pathlib import Path
 from typing import Any
 
 # JIRA_URL / CONFLUENCE_URL are required env vars (no hardcoded defaults — see
@@ -129,7 +129,8 @@ def cmd_import(args: argparse.Namespace) -> None:
 
     Splits the export by matching each cookie against JIRA_URL / CONFLUENCE_URL
     and writes each service's jar, then probes the REST API so the user gets
-    immediate confirmation the imported session is live.
+    immediate confirmation the imported session is live. On success (jars
+    written), deletes the source export JSON so live cookies do not linger.
     """
     try:
         with open(args.file) as fh:
@@ -173,6 +174,17 @@ def cmd_import(args: argparse.Namespace) -> None:
             "export file and that those env vars point at the right instance."
         )
         sys.exit(2)
+
+    # Export holds live session cookies — remove it once jars are written so it
+    # does not linger in Downloads (SECURITY.md). Keep the file only when import
+    # never consumed it (parse error / no host match above).
+    export_path = Path(args.file)
+    try:
+        export_path.unlink(missing_ok=True)
+        print(f"removed export {export_path}")
+    except OSError as exc:
+        _eprint(f"warning: could not remove export {export_path}: {exc}")
+
     if not any_live:
         sys.exit(2)
 

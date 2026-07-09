@@ -11,6 +11,8 @@ dir via ATLASSIAN_STORAGE_STATE, and stub the liveness probe. Coverage:
   - malformed JSON / missing cookies list are rejected (exit 2)
   - an export with no matching cookies exits 2
   - a NOT-live import still writes the jar but exits 2
+  - successful import deletes the export JSON (credentials must not linger)
+  - failed import (no match / bad file) leaves the export in place
 """
 
 from __future__ import annotations
@@ -67,6 +69,8 @@ def test_import_splits_by_domain(env, tmp_path):
     # The IdP cookie belongs to neither service jar.
     assert "idp" not in _names(_jar(tmp_path, "jira"))
     assert "idp" not in _names(_jar(tmp_path, "confluence"))
+    # Export is deleted after jars are written (treat like a password).
+    assert not export.exists()
 
 
 def test_session_cookie_expires_minus_one_survives(env, tmp_path):
@@ -77,6 +81,7 @@ def test_session_cookie_expires_minus_one_survives(env, tmp_path):
     cli.cmd_import(SimpleNamespace(file=str(export), service="jira"))
     sess = next(c for c in _jar(tmp_path, "jira")["cookies"] if c["name"] == "JSESSIONID")
     assert sess["expires"] == -1
+    assert not export.exists()
 
 
 def test_service_filter_only_writes_that_jar(env, tmp_path):
@@ -87,6 +92,7 @@ def test_service_filter_only_writes_that_jar(env, tmp_path):
     cli.cmd_import(SimpleNamespace(file=str(export), service="jira"))
     assert (tmp_path / "state-jira.json").exists()
     assert not (tmp_path / "state-confluence.json").exists()
+    assert not export.exists()
 
 
 def test_malformed_json_rejected(env, tmp_path):
@@ -95,6 +101,7 @@ def test_malformed_json_rejected(env, tmp_path):
     with pytest.raises(SystemExit) as ei:
         cli.cmd_import(SimpleNamespace(file=str(bad), service=None))
     assert ei.value.code == 2
+    assert bad.exists()  # never consumed — leave for the user to fix
 
 
 def test_missing_cookies_list_rejected(env, tmp_path):
@@ -103,6 +110,7 @@ def test_missing_cookies_list_rejected(env, tmp_path):
     with pytest.raises(SystemExit) as ei:
         cli.cmd_import(SimpleNamespace(file=str(bad), service=None))
     assert ei.value.code == 2
+    assert bad.exists()
 
 
 def test_no_matching_cookies_exits_2(env, tmp_path):
@@ -112,6 +120,7 @@ def test_no_matching_cookies_exits_2(env, tmp_path):
     with pytest.raises(SystemExit) as ei:
         cli.cmd_import(SimpleNamespace(file=str(export), service=None))
     assert ei.value.code == 2
+    assert export.exists()  # not imported — keep so env/host can be fixed and retried
 
 
 def test_not_live_exits_2_but_writes_jar(tmp_path, monkeypatch):
@@ -127,3 +136,5 @@ def test_not_live_exits_2_but_writes_jar(tmp_path, monkeypatch):
     assert ei.value.code == 2
     # Jar is written even when not live, so a later refresh/retry can reuse it.
     assert (tmp_path / "state-jira.json").exists()
+    # Export still deleted: cookies were consumed into the jar (and are dead either way).
+    assert not export.exists()

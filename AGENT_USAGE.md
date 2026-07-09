@@ -93,7 +93,7 @@ or a clear "NOT live — re-export" message if the cookies are already expired.
 | --- | --- |
 | `.atlassian-browser-state-jira.json` | Saved Jira cookie jar |
 | `.atlassian-browser-state-confluence.json` | Saved Confluence cookie jar |
-| `atlassian-cookies.json` (in ~/Downloads) | Extension export — delete after `import` |
+| `atlassian-cookies.json` (in ~/Downloads) | Extension export — removed automatically by `import` after jars are written |
 
 ## Env vars
 
@@ -112,7 +112,7 @@ or a clear "NOT live — re-export" message if the cookies are already expired.
 - **Confluence Cloud** URLs get `/wiki` appended automatically; Server/DC hosts
   are left as-is.
 - The exported `atlassian-cookies.json` holds **live session cookies** — treat it
-  like a password and delete it after importing.
+  like a password; `import` deletes it automatically after writing the jars.
 - Jira and Confluence keep **separate** cookie jars. On Cloud they share one host,
   so one export covers both; `import` writes both jars.
 - Never commit the `.atlassian-browser-*` files or `atlassian-cookies*.json` —

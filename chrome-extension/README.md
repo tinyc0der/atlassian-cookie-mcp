@@ -52,7 +52,7 @@ The same folder loads unchanged in Edge (`edge://extensions`), Brave, and Arc.
 ## Security
 
 The exported JSON contains **live session cookies** — treat it like a password.
-Delete the download after importing. The `.atlassian-*` jars and any
+`atlassian-cli import` deletes the download after writing the jars. The `.atlassian-*` jars and any
 `*cookies*.json` files are git-ignored; never commit them.
 
 ## Managed / corporate Chrome caveat
