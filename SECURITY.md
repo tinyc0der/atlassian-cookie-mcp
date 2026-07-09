@@ -32,21 +32,21 @@ Only the latest version receives security updates. We recommend always running t
 
 ### Authentication
 
-- **Browser-based SSO** - No API tokens or passwords stored in config
-- **Playwright storage state** - Cookies persisted locally in a gitignored file
-- **Automatic session refresh** - SSO redirect detection triggers re-authentication
+- **Browser-cookie SSO** - No API tokens or passwords stored in config; cookies are captured out-of-band (Chrome extension export or live-browser harvest), never by driving a browser
+- **Local storage state** - Cookies persisted locally in gitignored per-service jars
+- **Automatic session refresh** - SSO redirect / 401 detection reloads cookies (and can re-harvest a live session); no browser is ever opened
 - **Configurable SSO markers** - Adapt detection to your identity provider
 
 ### Data Protection
 
 - **No credentials in code** - All URLs and settings via environment variables
-- **Local-only cookie storage** - `.atlassian-browser-state.json` is gitignored
-- **Browser profile isolation** - Dedicated Chromium profile directory
+- **Local-only cookie storage** - `.atlassian-browser-state-*.json` jars and any `atlassian-cookies*.json` export are gitignored
+- **Least-privilege extension** - The Chrome extension requests cookie access only for the specific Jira/Confluence origins you enter, at runtime
 
 ### For Users
 
-1. **Never commit `.atlassian-browser-state.json`** - It contains session cookies
-2. **Keep the browser profile directory private** - It may contain cached credentials
+1. **Never commit the cookie jars or exports** - `.atlassian-browser-state-*.json` and `atlassian-cookies*.json` contain live session cookies
+2. **Delete the extension export after importing** - Treat `atlassian-cookies.json` like a password
 3. **Use environment variables** for all configuration
 4. **Keep updated** - Run the latest version of both this wrapper and `mcp-atlassian`
 

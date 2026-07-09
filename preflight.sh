@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Atlassian MCP preflight — bounded session check that CANNOT hang.
 #
-# Why this exists: the Atlassian MCP is browser-backed (Playwright). When its
-# session is missing/expired it blocks indefinitely with no timeout, so the
-# agent freezes until the user cancels. This script tests the saved browser
-# cookies against the Jira/Confluence REST API with a HARD curl --max-time
-# bound, so it always returns in <~8s with a clear verdict.
+# Why this exists: the Atlassian MCP is cookie-backed. When its session is
+# missing/expired the agent would otherwise discover that only mid-call. This
+# script tests the saved browser cookies against the Jira/Confluence REST API
+# with a HARD curl --max-time bound, so it always returns in <~8s with a clear
+# verdict.
 #
 # Usage:
 #   preflight.sh jira        # check Jira session
@@ -14,8 +14,10 @@
 #
 # Exit codes: 0 = all checked services GREEN; 1 = at least one RED.
 # Agent contract: a fast GREEN/RED check before Atlassian calls. If RED, re-auth
-# with the CLI: `atlassian-cli login <svc>`. (The MCP server no longer hangs on a
-# missing session — it fails fast — but a GREEN check still saves a round-trip.)
+# by exporting cookies with the browser extension and running
+# `atlassian-cli import <file>` (or `atlassian-cli login <svc>` to reuse a live
+# Arc/Brave session). The MCP server fails fast on a missing session — it never
+# hangs — but a GREEN check still saves a round-trip.
 
 set -uo pipefail
 
@@ -101,7 +103,7 @@ PY
   fi
 
   if [[ "$had_cookies" == "0" ]]; then
-    echo "RED  $svc  (no $host cookies; no live browser session) — run: atlassian-cli login $svc"
+    echo "RED  $svc  (no $host cookies; no live browser session) — export via the browser extension, then: atlassian-cli import <file>"
     return 1
   fi
   # had cookies but none authenticated — classify by the last response code

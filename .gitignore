@@ -8,11 +8,18 @@ dist/
 build/
 .eggs/
 .venv-atlassian-browser/
-.atlassian-browser-profile/
-# Session cookie jars — live credentials, never commit. Covers the legacy
-# single state file and the per-service files (.atlassian-browser-state-jira.json,
-# .atlassian-browser-state-confluence.json).
-.atlassian-browser-state*.json
+# Browser profile(s) — live credentials. Covers the automation profile and any
+# timestamped .bak copies.
+.atlassian-browser-profile*
+# Session cookie jars and their backups — live credentials, never commit. Covers
+# per-service files (.atlassian-browser-state-jira.json), the legacy single file,
+# extensionless copies, and timestamped .bak backups.
+.atlassian-browser-state*
+# Cookie exports downloaded from the browser extension (live credentials).
+atlassian-cookies*.json
+# Personal / machine-local launchers that embed absolute paths or instance URLs.
+start-codex.sh
+atlassian-cli-codex
 .env
 .mypy_cache/
 .ruff_cache/

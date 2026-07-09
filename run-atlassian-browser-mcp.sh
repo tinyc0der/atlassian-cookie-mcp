@@ -22,18 +22,13 @@ fi
 if ! "${PYTHON_BIN}" - <<'PY' >/dev/null 2>&1
 import importlib.metadata as m
 m.version("atlassian-browser-mcp")  # raises if not installed
-import mcp_atlassian, playwright, requests  # noqa: F401
+import mcp_atlassian, requests  # noqa: F401
 PY
 then
   # Bound the install so a slow/offline network fails fast instead of hanging
   # the MCP startup forever. 600s is generous for a cold editable install.
   timeout 600 uv pip install --python "${PYTHON_BIN}" -e "${ROOT_DIR}" \
     || { echo "atlassian-browser-mcp: dependency install failed or timed out" >&2; exit 1; }
-fi
-
-if ! "${PYTHON_BIN}" -m playwright install --list 2>/dev/null | grep -q "chromium"; then
-  timeout 600 "${PYTHON_BIN}" -m playwright install chromium >/dev/null \
-    || { echo "atlassian-browser-mcp: playwright chromium install failed or timed out" >&2; exit 1; }
 fi
 
 # Startup compatibility assertion: verify the upstream version and patched signatures

@@ -7,14 +7,17 @@ straight to the Jira/Confluence Server/DC REST APIs with the authenticated
 requests.Session, so there is no MCP transport or upstream mcp-atlassian layer
 to break.
 
-Auth: reuses the saved Playwright storage state. If cookies are missing or
-expired, run `login` (opens a browser for SSO/MFA) and retry.
+Auth: reuses cookies captured by the Chrome extension (see chrome-extension/)
+via `import`, or auto-harvested from a live browser. If cookies are missing or
+expired, export them with the extension and run `import`, then retry. No browser
+is ever opened by this tool.
 
 Env (required, no defaults — same as the rest of this project):
   JIRA_URL         e.g. <your-jira-host>
   CONFLUENCE_URL   e.g. <your-confluence-host>
 
 Examples:
+  atlassian-cli import ~/Downloads/atlassian-cookies.json
   atlassian-cli login jira
   atlassian-cli jira get PROJ-123 --comments
   atlassian-cli jira search 'project = PROJ AND status = "In Progress"' --max 10
@@ -36,8 +39,8 @@ from typing import Any
 
 from atlassian_browser_auth import (  # noqa: E402
     BrowserAuthConfig,
+    _cookie_matches_base_url,
     create_browser_session,
-    interactive_login,
 )
 
 
@@ -55,19 +58,41 @@ def _session(service: str):
     return create_browser_session(service, _base(service))
 
 
+def _api_error_messages(r) -> list[str]:
+    """Extract Atlassian REST error strings (errorMessages + errors map)."""
+    try:
+        data = r.json()
+    except ValueError:
+        return []
+    out = list(data.get("errorMessages") or [])
+    errors = data.get("errors")
+    if isinstance(errors, dict):
+        out += [f"{k}: {v}" for k, v in errors.items()]
+    return out
+
+
 def _get_json(service: str, path: str, params: dict | None = None) -> Any:
     s = _session(service)
     # requests timeouts are in SECONDS: (connect, read).
     r = s.get(f"{_base(service)}{path}", params=params or {}, timeout=(10, 30))
     if r.status_code != 200:
         _eprint(f"HTTP {r.status_code} for {path}")
-        # Don't dump the raw body: an error/redirect page can contain CSRF
-        # tokens, an SSO login page, or internal hostnames. Show a hint instead.
         ctype = r.headers.get("Content-Type", "?")
-        _eprint(
-            f"(response {len(r.content)} bytes, content-type={ctype}; "
-            f"if this looks like an SSO page, re-run: atlassian-cli login {service})"
-        )
+        # A structured JSON error (errorMessages/errors) is safe to show and far
+        # more actionable than a byte count — surface it. For non-JSON bodies
+        # (e.g. an HTML SSO page that could leak CSRF tokens / internal hosts)
+        # keep to a hint instead of dumping the body.
+        if "application/json" in ctype:
+            msgs = _api_error_messages(r)
+            for m in msgs:
+                _eprint(f"  - {m}")
+            if not msgs:
+                _eprint(f"(JSON error, {len(r.content)} bytes)")
+        else:
+            _eprint(
+                f"(response {len(r.content)} bytes, content-type={ctype}; "
+                f"if this looks like an SSO page, re-run: atlassian-cli login {service})"
+            )
         sys.exit(2)
     return r.json()
 
@@ -99,8 +124,96 @@ def _html_to_markdown(html: str) -> str:
 
 # ---- commands -------------------------------------------------------------
 def cmd_login(args: argparse.Namespace) -> None:
-    res = interactive_login(args.service)
-    print(json.dumps(res, indent=2))
+    """Try to reuse a live session from a readable browser; else explain export.
+
+    No browser is opened. Modern Chrome cookies are app-bound and cannot be read
+    off disk, so if no other browser (Arc/Brave/...) has a readable live session
+    this points the user at the extension + `import` flow.
+    """
+    from cookie_autoauth import auto_harvest
+
+    svc = args.service
+    cfg = BrowserAuthConfig.from_env(svc)
+    base = cfg.service_base(svc)
+    res = auto_harvest(
+        svc, base, storage_state_path=cfg.storage_state, user_agent=cfg.user_agent
+    )
+    for attempt in res.attempts:
+        _eprint(f"  {attempt}")
+    if res.authenticated:
+        print(json.dumps({
+            "status": "ok",
+            "service": svc,
+            "source": f"{res.browser}/{res.profile}",
+            "cookie_count": res.cookie_count,
+            "storage_state": res.storage_state_path,
+        }, indent=2))
+        return
+
+    ext = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome-extension")
+    _eprint(
+        "\nNo live session found in a readable browser (modern Chrome cookies are "
+        "app-bound and can't be read off disk).\n"
+        f"Load the extension in {ext} (chrome://extensions -> Developer mode -> "
+        "Load unpacked), click Export, then run:\n"
+        "  atlassian-cli import ~/Downloads/atlassian-cookies.json"
+    )
+    sys.exit(3)
+
+
+def cmd_import(args: argparse.Namespace) -> None:
+    """Load cookies exported by the browser extension into the per-service jars.
+
+    Splits the export by matching each cookie against JIRA_URL / CONFLUENCE_URL
+    and writes each service's jar, then probes the REST API so the user gets
+    immediate confirmation the imported session is live.
+    """
+    from cookie_autoauth import _probe_live, write_storage_state
+
+    try:
+        with open(args.file) as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        _eprint(f"cannot read cookie export {args.file}: {exc}")
+        sys.exit(2)
+    cookies = data.get("cookies")
+    if not isinstance(cookies, list):
+        _eprint(f"invalid export {args.file}: missing a 'cookies' list")
+        sys.exit(2)
+
+    services = [args.service] if args.service else ["jira", "confluence"]
+    any_live = False
+    any_matched = False
+    for svc in services:
+        cfg = BrowserAuthConfig.from_env(svc)
+        base = cfg.service_base(svc)
+        matched = [c for c in cookies if _cookie_matches_base_url(c, base)]
+        if not matched:
+            _eprint(f"{svc}: no cookies in the export match {base} — skipped")
+            continue
+        any_matched = True
+        write_storage_state(matched, cfg.storage_state)
+        status = _probe_live(base, svc, matched, cfg.user_agent)
+        if status == 200:
+            any_live = True
+            print(
+                f"{svc}: imported {len(matched)} cookies -> HTTP 200 (live)  "
+                f"[{cfg.storage_state.name}]"
+            )
+        else:
+            print(
+                f"{svc}: imported {len(matched)} cookies -> HTTP {status} "
+                f"(NOT live; sign into {svc} in your browser and re-export)"
+            )
+
+    if not any_matched:
+        _eprint(
+            "No cookies matched your JIRA_URL / CONFLUENCE_URL hosts. Check the "
+            "export file and that those env vars point at the right instance."
+        )
+        sys.exit(2)
+    if not any_live:
+        sys.exit(2)
 
 
 def cmd_jira_get(args: argparse.Namespace) -> None:
@@ -127,18 +240,24 @@ def cmd_jira_get(args: argparse.Namespace) -> None:
 
 
 def cmd_jira_search(args: argparse.Namespace) -> None:
+    # Jira Cloud removed GET /rest/api/2/search (410 Gone) in 2025; use the
+    # enhanced-JQL endpoint. It requires a BOUNDED jql and an explicit fields
+    # list, and returns {issues, nextPageToken, isLast} — no total/startAt
+    # (token pagination). An unbounded query surfaces a clear 400 via _get_json.
     params = {"jql": args.jql, "maxResults": args.max,
               "fields": args.fields or "summary,status,assignee"}
-    data = _get_json("jira", "/rest/api/2/search", params)
+    data = _get_json("jira", "/rest/api/2/search/jql", params)
     if args.raw:
         print(json.dumps(data, indent=2))
         return
-    for it in data.get("issues", []):
+    issues = data.get("issues", [])
+    for it in issues:
         f = it.get("fields", {})
         st = (f.get("status") or {}).get("name", "?")
         who = (f.get("assignee") or {}).get("displayName", "-")
         print(f"  {it['key']:14} [{st:14}] {who:22} {f.get('summary','')}")
-    print(f"\n  total: {data.get('total')}")
+    more = "" if data.get("isLast", True) else "  (more available — raise --max)"
+    print(f"\n  shown: {len(issues)}{more}")
 
 
 def cmd_conf_get(args: argparse.Namespace) -> None:
@@ -177,9 +296,18 @@ def build_parser() -> argparse.ArgumentParser:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pl = sub.add_parser("login", help="open browser for SSO login")
+    pl = sub.add_parser("login", help="reuse a live browser session, or explain export")
     pl.add_argument("service", choices=["jira", "confluence"], default="jira", nargs="?")
     pl.set_defaults(func=cmd_login)
+
+    pi = sub.add_parser("import", help="import cookies exported by the browser extension")
+    pi.add_argument("file", help="path to atlassian-cookies.json from the extension")
+    pi.add_argument(
+        "--service",
+        choices=["jira", "confluence"],
+        help="only import this service (default: both)",
+    )
+    pi.set_defaults(func=cmd_import)
 
     pj = sub.add_parser("jira", help="Jira commands").add_subparsers(dest="jcmd", required=True)
     g = pj.add_parser("get", help="get an issue")

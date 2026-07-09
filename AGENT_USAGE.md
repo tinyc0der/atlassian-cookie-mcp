@@ -1,43 +1,47 @@
 # Atlassian access for agents (Jira + Confluence)
 
 **TL;DR for an AI agent:** use the CLI at `./atlassian-cli`. It reuses an
-existing Jira/Confluence session — first by **auto-harvesting live cookies from
-whatever browser you actually use** (Arc, Chrome, Brave, Edge, …), and only if
-none has a live session does it open a real Chrome window for a one-time SSO.
-Read this file, then run the commands below. Do **not** rebuild or reconfigure
-anything — it already works once `JIRA_URL` / `CONFLUENCE_URL` are set.
+existing Jira/Confluence session — first by **auto-harvesting live cookies from a
+readable browser** (Arc, Brave, Edge, …), and otherwise from cookies you export
+once with the **Chrome extension** (`chrome-extension/`) and load via
+`atlassian-cli import`. **No browser is ever opened by this tool.** Read this
+file, then run the commands below. Do **not** rebuild or reconfigure anything —
+it already works once `JIRA_URL` / `CONFLUENCE_URL` are set and a session is
+imported.
 
 ## How auth resolves (the order — this is the whole design)
 
 1. **Saved cookie jar** still valid → used immediately, no work.
 2. **Auto-harvest** (`cookie_autoauth.py` → `cookie_harvest.py`): scans every
    installed Chromium-family browser, decrypts its Jira/Confluence cookies via
-   that browser's macOS Keychain key (the `<Browser> Safe Storage` entry), and
-   probes the REST API with a **bounded** request. The first browser that
-   answers HTTP 200 wins; its cookies are saved as the jar. **No window opens,
-   nothing hangs.** This is why you don't have to be logged into *Chrome*
-   specifically — if your live session is in **Arc**, it's reused from Arc.
-3. **Interactive SSO** — ONLY when no browser has a live session: a visible
-   **real Chrome** window opens at the login page; you complete SSO/MFA once; it
-   closes and saves the jar. That Chrome automation profile then keeps the SSO
-   session, so subsequent refreshes are hands-free.
+   that browser's macOS Keychain key, and probes the REST API with a **bounded**
+   request. The first browser that answers HTTP 200 wins; its cookies are saved
+   as the jar. **No window opens, nothing hangs.** Note: **modern Chrome (127+)
+   cookies are "app-bound" and cannot be read off disk**, so if your live
+   session is only in Chrome, harvest finds nothing — use the extension (below).
+3. **Browser-extension export** — the reliable path for Chrome: load
+   `chrome-extension/` unpacked, click **Export**, then
+   `atlassian-cli import ~/Downloads/atlassian-cookies.json`. The extension reads
+   cookies from Chrome's live cookie store (plaintext, incl. HttpOnly), so it is
+   immune to the app-bound-encryption problem. See
+   [`chrome-extension/README.md`](chrome-extension/README.md).
 
 The MCP **server never opens a window** (it can harvest silently, but on a true
-miss it raises "run `atlassian-cli login`" instead of hanging). Only the CLI,
-run by a human in a terminal, ever shows the interactive SSO window.
+miss it raises "export cookies and run `atlassian-cli import`" instead of
+hanging).
 
-**Diagnose first, don't guess:** to see exactly which browsers have cookies and
-whether any session is live, run `python3 cookie_autoauth.py jira` (or
-`confluence`) — it prints a per-browser line like `arc/Default: 7 cookies ->
-HTTP 200`. If it says no browser is live, the session genuinely expired and an
-SSO `login` is required; that is not a tooling bug.
+**Diagnose first, don't guess:** to see exactly which browsers have readable
+cookies and whether any session is live, run `python3 cookie_autoauth.py jira`
+(or `confluence`) — it prints a per-browser line like `arc/Default: 7 cookies ->
+HTTP 200`. If it says no browser is live (common when your session is only in
+modern Chrome), export with the extension and `import`.
 
 ## Why this exists
 
-Many Atlassian Server / Data Center instances sit behind corporate SSO, which
-blocks API tokens. This tool captures a real browser session (Playwright +
-Chrome) once, saves the cookies, and reuses them for headless REST calls. There
-are two front-ends over the same auth core (`atlassian_browser_auth.py`):
+Many Atlassian instances sit behind corporate SSO, which blocks API tokens (and
+this also works for Atlassian **Cloud**, `*.atlassian.net`). This tool captures a
+real browser session's cookies once and reuses them for headless REST calls.
+There are two front-ends over the same auth core (`atlassian_browser_auth.py`):
 
 - **`./atlassian-cli`** — command-line, best for agents. Start here.
 - **MCP server** (`atlassian_browser_mcp_full.py`) — for the Cursor/Claude MCP
@@ -49,32 +53,31 @@ are two front-ends over the same auth core (`atlassian_browser_auth.py`):
 them for your instance, e.g.:
 
 ```bash
-export JIRA_URL="https://jira.example.com"
-export CONFLUENCE_URL="https://confluence.example.com"
+export JIRA_URL="https://yourco.atlassian.net"
+export CONFLUENCE_URL="https://yourco.atlassian.net"   # Cloud: /wiki auto-appended
 ```
+
+On Atlassian Cloud, Jira and Confluence share the tenant host and Confluence REST
+lives under `/wiki` — the tool appends `/wiki` automatically for `*.atlassian.net`
+Confluence URLs, so the bare tenant host works.
 
 ## First-time setup (once per machine)
 
-The launcher strips sandbox CA env vars that can break TLS and runs in the
-project venv. From this directory:
+1. Load the extension: open `chrome://extensions`, enable **Developer mode**,
+   click **Load unpacked**, and select `chrome-extension/`.
+2. Click the extension icon, enter your Jira and Confluence hosts, click
+   **Export** → downloads `atlassian-cookies.json`.
+3. Import it (splits into per-service jars and verifies each is live):
 
-```bash
-# Log in once per service. A Chrome window opens; if the user is already
-# signed into SSO in their Chrome profile, it completes hands-free.
-ATLASSIAN_SEED_FROM_CHROME_PROFILE=Default ./atlassian-cli login jira
-ATLASSIAN_SEED_FROM_CHROME_PROFILE=Default ./atlassian-cli login confluence
-```
+   ```bash
+   ./atlassian-cli import ~/Downloads/atlassian-cookies.json
+   ```
 
-`ATLASSIAN_SEED_FROM_CHROME_PROFILE=Default` copies the user's real Chrome
-"Default" profile (cookies, saved logins, Bitwarden extension) into a dedicated
-automation profile **once**. This is required on Chrome 136+, which refuses to
-let automation drive the live profile in place. Use a different profile name
-(e.g. `"Profile 1"`) or an absolute path if needed.
+If your live session already lives in Arc/Brave, you can skip the extension and
+just run `./atlassian-cli login jira` — it auto-harvests that session. Re-export
+and re-`import` whenever the session expires.
 
-After the first login the saved session is reused automatically — later
-commands need **no** browser and **no** seed variable.
-
-## Daily commands (no browser opens once logged in)
+## Daily commands (no browser opens)
 
 ```bash
 # Jira: get an issue (add --comments for the thread, --raw for full JSON)
@@ -92,33 +95,28 @@ commands need **no** browser and **no** seed variable.
 
 ## If a command says it can't authenticate
 
-First, the tool already tried to auto-harvest a live session from every browser
-and found none live. Confirm what's actually there:
+First, the tool already tried the saved jar and an auto-harvest and found
+nothing live. Confirm what's actually there:
 
 ```bash
 python3 cookie_autoauth.py jira        # per-browser cookie + live-probe report
 ```
 
 - If a browser shows `-> HTTP 200`, auth will just work (re-run your command).
-- If all show non-200 (e.g. `HTTP 401`), the session genuinely expired
-  everywhere. Re-establish it by signing in **in your normal browser** (Arc,
-  Chrome, …) — the very next call auto-harvests it. Or do a one-time SSO via the
-  tool's own Chrome:
+- If all show non-200 or "no matching cookies" (typical when your session is only
+  in modern Chrome), **re-export with the extension** and import:
 
 ```bash
-./atlassian-cli login jira        # opens real Chrome for SSO, then saves the jar
+./atlassian-cli import ~/Downloads/atlassian-cookies.json
 ```
-
-The browser profile is **never** auto-deleted, so re-login is usually instant
-(the long-lived SSO session in the profile is still valid).
 
 ## Files (all git-ignored, local only)
 
 | File | What |
 | --- | --- |
-| `.atlassian-browser-profile/` | The seeded Chrome automation profile (cookies, logins, Bitwarden) |
 | `.atlassian-browser-state-jira.json` | Saved Jira cookie jar |
 | `.atlassian-browser-state-confluence.json` | Saved Confluence cookie jar |
+| `atlassian-cookies.json` (in ~/Downloads) | Extension export — delete after `import` |
 
 ## Env vars
 
@@ -126,19 +124,21 @@ The browser profile is **never** auto-deleted, so re-login is usually instant
 | --- | --- | --- |
 | `JIRA_URL` | (required) | Jira base URL |
 | `CONFLUENCE_URL` | (required) | Confluence base URL |
-| `ATLASSIAN_COOKIE_HARVEST` | `true` | Master switch for auto-harvest. Set falsy to disable and force the saved-jar / interactive path only. |
+| `ATLASSIAN_COOKIE_HARVEST` | `true` | Master switch for auto-harvest. Set falsy to disable and use only the saved jar / imported cookies. |
 | `ATLASSIAN_COOKIE_SOURCE_BROWSERS` | (all installed) | Comma list of browsers to harvest from, in order, e.g. `arc,chrome`. Acts as an allow-list. Known: arc, brave, vivaldi, edge, opera, chrome, chromium, dia. |
-| `ATLASSIAN_SEED_FROM_CHROME_PROFILE` | (unset) | Chrome profile name/path to seed the interactive-login profile from. Optional now that harvest covers reuse. |
-| `ATLASSIAN_CHROME_USER_DATA_DIR` | `~/Library/Application Support/Google/Chrome` | Where Chrome profiles live (macOS default) |
-| `ATLASSIAN_BROWSER_CHANNEL` | `chrome` | Playwright browser channel for interactive login (real Chrome, not bundled Chromium) |
-| `ATLASSIAN_LOGIN_TIMEOUT_SECONDS` | `300` | How long the login window waits for SSO |
+| `ATLASSIAN_STORAGE_STATE` | (per-service default) | Override the cookie-jar path; namespaced per service. |
+| `ATLASSIAN_BROWSER_USER_AGENT` | Chrome UA | User-Agent used for REST requests and liveness probes. |
 
 ## Notes / gotchas
 
-- **Quit Chrome before the first seeded `login`** if the copy looks incomplete:
-  a live Chrome can hold the cookie DB mid-write. Re-running `login` re-seeds
-  only if the automation profile is empty.
-- Jira and Confluence keep **separate** cookie jars but share one browser
-  profile, so one seeded SSO session covers both.
-- Never commit the `.atlassian-browser-*` files — they contain live session
-  cookies. They are git-ignored.
+- **Jira Cloud search** uses the enhanced-JQL endpoint (`/rest/api/2/search/jql`);
+  it requires a **bounded** query — add a restriction (e.g. `project = X`,
+  `updated >= -7d`). An unbounded `order by …` alone returns a clear 400.
+- **Confluence Cloud** URLs get `/wiki` appended automatically; Server/DC hosts
+  are left as-is.
+- The exported `atlassian-cookies.json` holds **live session cookies** — treat it
+  like a password and delete it after importing.
+- Jira and Confluence keep **separate** cookie jars. On Cloud they share one host,
+  so one export covers both; `import` writes both jars.
+- Never commit the `.atlassian-browser-*` files or `atlassian-cookies*.json` —
+  they contain live session cookies. They are git-ignored.

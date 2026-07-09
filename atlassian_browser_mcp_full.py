@@ -268,16 +268,17 @@ def atlassian_login(
     target: Literal["jira", "confluence"] = "jira",
     url: str | None = None,
 ) -> dict[str, Any]:
-    """Report how to authenticate. Login is handled OUT-OF-BAND by the CLI.
+    """Report how to authenticate. Cookies are captured OUT-OF-BAND.
 
-    This tool intentionally does NOT drive Playwright in-process: a sync
-    browser login inside the async-dispatched MCP server deadlocks the event
-    loop ("Playwright Sync API inside the asyncio loop") and was a cause of the
-    server hanging. Instead, run the CLI in a terminal where a browser can open:
+    This tool intentionally does NOT open a browser or drive Playwright (removed
+    entirely): a sync browser login inside the async-dispatched MCP server
+    deadlocks the event loop and hung the server. Instead, capture cookies with
+    the Chrome extension (chrome-extension/) and load them via the CLI:
 
-        atlassian-cli login <jira|confluence>
+        atlassian-cli import ~/Downloads/atlassian-cookies.json
 
-    Once that completes, the saved cookie jar is reused by the server's tools
+    Or, if a live session exists in Arc/Brave, `atlassian-cli login <target>`
+    auto-harvests it. Once the jar is saved, the server's tools reuse it
     automatically — no browser is ever opened from within the server.
     """
     cli = os.path.join(os.path.dirname(os.path.abspath(__file__)), "atlassian-cli")
@@ -286,11 +287,12 @@ def atlassian_login(
         "service": target,
         "message": (
             f"Authentication for {target} is done out-of-band to keep the server "
-            f"non-blocking. In a terminal with a display, run:  {cli} login {target}  "
-            f"then retry your request. The server reuses the saved session and "
-            f"never opens a browser itself."
+            f"non-blocking. Export cookies with the Chrome extension (chrome-extension/), "
+            f"then run:  {cli} import <atlassian-cookies.json>  and retry. "
+            f"(Or `{cli} login {target}` to auto-harvest a live Arc/Brave session.) "
+            f"The server reuses the saved session and never opens a browser itself."
         ),
-        "command": f"{cli} login {target}",
+        "command": f"{cli} import <atlassian-cookies.json>",
     }
 
 

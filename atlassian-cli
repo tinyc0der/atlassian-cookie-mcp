@@ -12,12 +12,5 @@ VENV_PY="$SCRIPT_DIR/.venv-atlassian-browser/bin/python"
 # JIRA_URL and CONFLUENCE_URL must be exported by the caller (shell or .mcp.json);
 # the CLI requires them and will error with guidance if unset.
 
-# Use the real Google Chrome channel (not Playwright's bundled chromium). The
-# seeded profile's cookies are encrypted with the OS keychain "Chrome Safe
-# Storage" key, which only real Chrome can decrypt; chromium uses a different
-# keychain entry and would fail to read the seeded session. Override by
-# exporting ATLASSIAN_BROWSER_CHANNEL before invoking.
-export ATLASSIAN_BROWSER_CHANNEL="${ATLASSIAN_BROWSER_CHANNEL:-chrome}"
-
 exec env -u NODE_EXTRA_CA_CERTS -u SSL_CERT_FILE -u CODEX_CA_CERTIFICATE \
   "$VENV_PY" "$SCRIPT_DIR/atlassian_cli.py" "$@"

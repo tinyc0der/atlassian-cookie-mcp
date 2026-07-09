@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Shared browser-backed authentication helpers for Atlassian requests."""
+"""Shared browser-cookie authentication helpers for Atlassian requests.
+
+Cookies are captured OUT-OF-BAND (the Chrome extension in ``chrome-extension/``
+exports them; ``atlassian-cli import`` loads them) or auto-harvested from a live
+browser session (``cookie_autoauth``). Nothing here ever opens a browser window
+or drives Playwright — on a cache miss it raises :class:`AuthRequiredError`.
+"""
 
 from __future__ import annotations
 
@@ -13,10 +19,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 import requests
-from playwright.sync_api import Error, TimeoutError, sync_playwright
 
 logger = logging.getLogger("atlassian-browser-auth")
 
@@ -24,34 +29,28 @@ ServiceName = Literal["jira", "confluence"]
 
 
 class AuthRequiredError(RuntimeError):
-    """Raised when a non-interactive session has no valid cookies.
+    """Raised when a session has no valid cookies.
 
-    The caller (e.g. the MCP server) should surface this to the user as a
-    clear instruction to authenticate out-of-band, instead of blocking on an
-    interactive browser login. Carries the service so the message can name the
-    exact command to run.
+    The caller (e.g. the MCP server) should surface this to the user as a clear
+    instruction to authenticate out-of-band, instead of blocking on an
+    interactive login. Carries the service so the message names the exact
+    command to run.
     """
 
     def __init__(self, service: ServiceName) -> None:
         self.service = service
         super().__init__(
-            f"Not authenticated for {service}. Run `atlassian-cli login {service}` "
-            f"in a terminal to sign in, then retry. (The server never opens a "
-            f"browser itself to avoid hanging.)"
+            f"Not authenticated for {service}. Export cookies with the Atlassian "
+            f"Cookie Exporter browser extension, then run "
+            f"`atlassian-cli import <file>` to load them (or sign into {service} "
+            f"in Arc/Brave and retry to auto-harvest a live session). The server "
+            f"never opens a browser itself."
         )
 
 
+# Serializes cookie refresh/harvest across threads so concurrent 401s don't
+# stampede the harvest + jar rewrite.
 _LOGIN_LOCK = threading.Lock()
-_USERNAME_SELECTORS = [
-    'input[name="identifier"]',
-    'input[name="username"]',
-    'input[name="email"]',
-    'input[type="email"]',
-    'input[id*="user"]',
-    'input[id*="email"]',
-    'input[autocomplete="username"]',
-    'input[type="text"]',
-]
 
 _DEFAULT_SSO_MARKERS = (
     "oauth2/authorize",
@@ -99,19 +98,12 @@ def url_matches_base(current_url: str, base_url: str) -> bool:
 
 @dataclass(frozen=True)
 class BrowserAuthConfig:
-    """Configuration for browser-based Atlassian authentication."""
+    """Configuration for browser-cookie Atlassian authentication."""
 
     jira_url: str
     confluence_url: str
-    username: str | None
-    profile_dir: Path
     storage_state: Path
-    channel: str
-    login_timeout_seconds: int
-    jira_login_url: str
-    confluence_login_url: str
     user_agent: str
-    seed_profile_dir: Path | None
 
     @classmethod
     def from_env(cls, service: "ServiceName | None" = None) -> "BrowserAuthConfig":
@@ -119,9 +111,8 @@ class BrowserAuthConfig:
 
         When ``service`` is given, the storage-state cookie cache is namespaced
         per service (Jira vs Confluence) so their cookies do not overwrite each
-        other — they share one browser profile (one seeded SSO session) but keep
-        separate cookie jars. Passing no service preserves the legacy single
-        state file for backward compatibility.
+        other. Passing no service preserves the legacy single state file for
+        backward compatibility.
         """
         jira_url = os.environ.get("JIRA_URL", "").rstrip("/")
         confluence_url = os.environ.get("CONFLUENCE_URL", "").rstrip("/")
@@ -135,34 +126,12 @@ class BrowserAuthConfig:
                 "CONFLUENCE_URL environment variable is required. "
                 "Set it to your Confluence instance URL (e.g., https://confluence.example.com)"
             )
+        confluence_url = cls._normalize_confluence_url(confluence_url)
         base_dir = Path(__file__).resolve().parent
         return cls(
             jira_url=jira_url,
             confluence_url=confluence_url,
-            username=os.environ.get("ATLASSIAN_USERNAME"),
-            profile_dir=Path(
-                os.environ.get(
-                    "ATLASSIAN_BROWSER_PROFILE_DIR",
-                    str(base_dir / ".atlassian-browser-profile"),
-                )
-            ).expanduser(),
             storage_state=cls._resolve_storage_state(base_dir, service),
-            # Default to the user's REAL Google Chrome, not Playwright's bundled
-            # Chromium. This tool seeds from / reuses the real Chrome profile and
-            # its corporate SSO session, so it must drive the same browser. The
-            # old "chromium" default sent the server path (which doesn't go
-            # through the CLI wrapper that sets this) down a "missing Chromium
-            # binary" dead end and broke profile/cookie reuse.
-            channel=os.environ.get("ATLASSIAN_BROWSER_CHANNEL", "chrome"),
-            login_timeout_seconds=int(
-                os.environ.get("ATLASSIAN_LOGIN_TIMEOUT_SECONDS", "300")
-            ),
-            jira_login_url=os.environ.get(
-                "ATLASSIAN_JIRA_LOGIN_URL", f"{jira_url}/secure/Dashboard.jspa"
-            ),
-            confluence_login_url=os.environ.get(
-                "ATLASSIAN_CONFLUENCE_LOGIN_URL", confluence_url
-            ),
             user_agent=os.environ.get(
                 "ATLASSIAN_BROWSER_USER_AGENT",
                 (
@@ -171,42 +140,7 @@ class BrowserAuthConfig:
                     "Chrome/136.0.0.0 Safari/537.36"
                 ),
             ),
-            seed_profile_dir=cls._resolve_seed_profile_dir(),
         )
-
-    @staticmethod
-    def _resolve_seed_profile_dir() -> Path | None:
-        """Resolve the real Chrome profile to seed the automation profile from.
-
-        Chrome 136+ refuses to let automation drive the live default
-        user-data-dir in place, so we cannot point Playwright straight at it.
-        Instead we copy a real profile ONCE into the dedicated automation dir,
-        which carries the user's saved passwords, installed extensions (e.g. a
-        password manager) and any existing corporate SSO cookies — so the first
-        login is one-click or skipped entirely. Opt in by setting
-        ATLASSIAN_SEED_FROM_CHROME_PROFILE to a profile name (e.g. "Default",
-        "Profile 1") or an absolute path.
-        """
-        raw = os.environ.get("ATLASSIAN_SEED_FROM_CHROME_PROFILE")
-        if not raw:
-            return None
-        candidate = Path(raw).expanduser()
-        if candidate.is_absolute():
-            return candidate if candidate.is_dir() else None
-        # Treat as a profile NAME under the Chrome user-data dir. Reject path
-        # separators / traversal so an env typo can't point us outside it.
-        if raw in {".", ".."} or "/" in raw or "\\" in raw or os.sep in raw:
-            return None
-        chrome_root = Path(
-            os.environ.get(
-                "ATLASSIAN_CHROME_USER_DATA_DIR",
-                str(Path.home() / "Library/Application Support/Google/Chrome"),
-            )
-        ).expanduser().resolve()
-        candidate = (chrome_root / raw).resolve()
-        if chrome_root not in candidate.parents:
-            return None
-        return candidate if candidate.is_dir() else None
 
     @staticmethod
     def _resolve_storage_state(base_dir: Path, service: "ServiceName | None") -> Path:
@@ -246,323 +180,31 @@ class BrowserAuthConfig:
                 pass
         return path
 
+    @staticmethod
+    def _normalize_confluence_url(url: str) -> str:
+        """Ensure Atlassian Cloud Confluence URLs include the /wiki context path.
+
+        On Cloud, Confluence REST lives under
+        ``https://<tenant>.atlassian.net/wiki``. A CONFLUENCE_URL without /wiki
+        makes every Confluence REST call 404, so append it when the host is
+        ``*.atlassian.net`` and the path doesn't already include it. Server/DC
+        hosts (not ``*.atlassian.net``) are left untouched.
+        """
+        if not url:
+            return url
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if host.endswith(".atlassian.net") and "/wiki" not in parsed.path:
+            return url.rstrip("/") + "/wiki"
+        return url
+
     def service_base(self, service: ServiceName) -> str:
         """Return the base URL for the given service."""
         return self.jira_url if service == "jira" else self.confluence_url
 
-    def login_target(self, service: ServiceName) -> str:
-        """Return the login entry point URL for the given service."""
-        return self.jira_login_url if service == "jira" else self.confluence_login_url
-
-
-def _wait_for_any_selector(
-    page, selectors: list[str], timeout_ms: int = 1800
-) -> str | None:
-    """Wait for any of the given selectors to become visible."""
-    try:
-        page.locator(", ".join(selectors)).first.wait_for(
-            state="visible",
-            timeout=timeout_ms,
-        )
-    except TimeoutError:
-        return None
-    except Error:
-        return None
-
-    for selector in selectors:
-        try:
-            if page.locator(selector).first.is_visible():
-                return selector
-        except Error:
-            continue
-    return None
-
-
-def _best_effort_prefill(page, username: str | None) -> None:
-    """Attempt to prefill the username field on the login page."""
-    if not username:
-        return
-    selector = _wait_for_any_selector(page, _USERNAME_SELECTORS)
-    if not selector:
-        return
-    try:
-        page.locator(selector).first.fill(username)
-        print(
-            f"[atlassian-browser-auth] Prefilled username into {selector}",
-            file=sys.stderr,
-            flush=True,
-        )
-    except Error as exc:
-        print(
-            f"[atlassian-browser-auth] Could not prefill username: {exc}",
-            file=sys.stderr,
-            flush=True,
-        )
-
-
-# Profile subpaths that must NOT be copied when seeding: caches (huge, useless)
-# and the singleton lock files Chrome uses to enforce one process per profile —
-# copying those would make the cloned profile think another Chrome owns it.
-_SEED_SKIP = {
-    "Cache",
-    "Code Cache",
-    "GPUCache",
-    "GraphiteDawnCache",
-    "DawnCache",
-    "Service Worker",
-    "Singleton Lock",
-    "SingletonLock",
-    "SingletonCookie",
-    "SingletonSocket",
-    "lockfile",
-}
-
-
-# Sentinel written only after a complete, verified seed. We guard on this
-# (not on the existence of "Default/", which Playwright itself creates on first
-# launch) so a partial/failed copy is never mistaken for a finished seed.
-_SEED_SENTINEL = ".seeded"
-
-
-def _seed_profile_if_needed(cfg: BrowserAuthConfig) -> None:
-    """One-time copy of a real Chrome profile into the automation profile dir.
-
-    Runs only when ATLASSIAN_SEED_FROM_CHROME_PROFILE resolved to an existing
-    profile AND this automation profile has not been successfully seeded yet
-    (no sentinel). The seed carries the user's cookies, saved logins and
-    existing SSO session so the first login is one-click or skipped. Caches and
-    singleton locks are skipped so the clone is small and not seen as owned by
-    the live Chrome.
-
-    Seeding is atomic-ish and verified: we copy into a temp dir, confirm the
-    load-bearing "Cookies" DB landed, then move it into place and write the
-    sentinel. A failed/partial copy logs and is discarded, leaving the slot
-    free to retry next run (it does NOT lock in a broken profile). To re-seed,
-    delete the automation profile dir.
-    """
-    seed = cfg.seed_profile_dir
-    if not seed or not seed.exists():
-        return
-    dest = cfg.profile_dir
-    if (dest / _SEED_SENTINEL).exists():
-        return
-    # Don't clobber a real pre-existing profile (older code, or a prior login
-    # with no seed). A genuine profile has multiple core files; require Cookies
-    # AND Preferences so a lone Cookies file — the signature of a seed that was
-    # interrupted after the Cookies move but before the sentinel — is treated as
-    # a half-copy and retried/overwritten rather than locked in.
-    default = dest / "Default"
-    if (default / "Cookies").exists() and (default / "Preferences").exists():
-        return
-
-    print(
-        f"[atlassian-browser-auth] Seeding automation profile from {seed} "
-        "(one-time copy of cookies and saved logins).",
-        file=sys.stderr,
-        flush=True,
-    )
-    staging = dest.parent / f"{dest.name}.seed-tmp"
-    try:
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
-        staging.mkdir(parents=True, mode=0o700)
-        _copy_tree_filtered(seed, staging / "Default")
-        local_state = seed.parent / "Local State"
-        if local_state.exists():
-            shutil.copy2(local_state, staging / "Local State")
-
-        # Verify the most load-bearing file actually copied. Without Cookies the
-        # seed is useless (it would silently fall through to a manual login), so
-        # treat a missing/empty Cookies DB as a failed seed.
-        cookies = staging / "Default" / "Cookies"
-        if not cookies.exists() or cookies.stat().st_size == 0:
-            raise RuntimeError(
-                "Cookies DB missing/empty after copy (is Chrome running? "
-                "quit it and retry)"
-            )
-
-        dest.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for item in staging.iterdir():
-            target = dest / item.name
-            if target.exists():
-                shutil.rmtree(target, ignore_errors=True) if target.is_dir() else target.unlink()
-            shutil.move(str(item), str(target))
-        (dest / _SEED_SENTINEL).touch(mode=0o600)
-        _chmod_tree_dirs(dest, 0o700)
-        print(
-            "[atlassian-browser-auth] Seed complete.",
-            file=sys.stderr,
-            flush=True,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"[atlassian-browser-auth] Profile seeding failed ({exc}); "
-            "falling back to a blank profile (will retry on next login).",
-            file=sys.stderr,
-            flush=True,
-        )
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
-
-
-def _chmod_tree_dirs(root: Path, mode: int) -> None:
-    """Restrict every directory under root to ``mode`` (defensive: keep 0o700)."""
-    try:
-        root.chmod(mode)
-        for d in root.rglob("*"):
-            if d.is_dir() and not d.is_symlink():
-                try:
-                    d.chmod(mode)
-                except OSError:
-                    continue
-    except OSError:
-        pass
-
-
-def _copy_tree_filtered(src: Path, dst: Path) -> None:
-    """Copy a Chrome profile dir, skipping cache and singleton-lock entries."""
-    dst.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for entry in src.iterdir():
-        if entry.name in _SEED_SKIP:
-            continue
-        target = dst / entry.name
-        try:
-            if entry.is_dir():
-                shutil.copytree(
-                    entry, target, dirs_exist_ok=True, symlinks=True,
-                    ignore=shutil.ignore_patterns(*_SEED_SKIP),
-                )
-            else:
-                shutil.copy2(entry, target, follow_symlinks=False)
-        except (OSError, shutil.Error):
-            # Locked/transient files (e.g. an open LevelDB) are non-fatal.
-            continue
-
-
-def interactive_login(
-    service: ServiceName = "jira",
-    url: str | None = None,
-    config: BrowserAuthConfig | None = None,
-) -> dict[str, Any]:
-    """Open a browser window for interactive SSO/MFA login and save cookies."""
-    cfg = config or BrowserAuthConfig.from_env(service)
-    cfg.profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    cfg.profile_dir.chmod(0o700)
-    cfg.storage_state.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if cfg.storage_state.parent != cfg.profile_dir:
-        cfg.storage_state.parent.chmod(0o700)
-    target_url = url or cfg.login_target(service)
-
-    with _LOGIN_LOCK:
-        # Seed under the lock: two concurrent logins share cfg.profile_dir and
-        # the fixed .seed-tmp staging path, so one could delete/partially move
-        # the other's seed and corrupt the profile. Serializing here prevents it.
-        _seed_profile_if_needed(cfg)
-        print(
-            f"[atlassian-browser-auth] Opening browser for {service} login at {target_url}",
-            file=sys.stderr,
-            flush=True,
-        )
-        print(
-            "[atlassian-browser-auth] Complete SSO / MFA in the browser window. "
-            "The request will resume automatically once the page lands on Jira or Confluence.",
-            file=sys.stderr,
-            flush=True,
-        )
-
-        deadline = time.time() + cfg.login_timeout_seconds
-        with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(cfg.profile_dir),
-                channel=cfg.channel,
-                headless=False,
-                viewport={"width": 1440, "height": 960},
-            )
-            try:
-                page = context.pages[0] if context.pages else context.new_page()
-                page.goto(target_url, wait_until="domcontentloaded")
-                _best_effort_prefill(page, cfg.username)
-
-                # Auth detection is fully URL-INDEPENDENT and IdP-agnostic. We do
-                # NOT watch page.url to decide when login is done — after a SAML
-                # form POST the page handle can stay stuck reporting the IdP URL
-                # (e.g. the corporate Okta/ADFS/Azure AD SSO host) even though the
-                # user is looking at a logged-in Confluence/Jira tab. Instead we
-                # probe the browser CONTEXT's cookies against the real REST API
-                # every tick via context.request (which shares the context cookie
-                # jar). This works for any Atlassian Server/DC instance behind any
-                # SSO provider, with no hardcoded host or marker assumptions.
-                # max_redirects=0 means an unauthenticated session (302 -> login)
-                # surfaces as a non-200 instead of following through to a 200 HTML
-                # login page, so only a genuine authenticated 200 closes the window.
-                check_path = "/rest/api/space?limit=1" if service == "confluence" else "/rest/api/2/myself"
-                api_url = f"{cfg.service_base(service)}{check_path}"
-                last_url = None
-                while time.time() < deadline:
-                    try:
-                        current_url = page.url
-                        if current_url != last_url:
-                            parsed = urlparse(current_url)
-                            safe_url = urlunparse(parsed._replace(query="", fragment=""))
-                            print(
-                                f"[atlassian-browser-auth] Browser now at: {safe_url}",
-                                file=sys.stderr,
-                                flush=True,
-                            )
-                            last_url = current_url
-                    except Error:
-                        # Page may be mid-navigation; keep probing cookies anyway.
-                        pass
-
-                    authenticated = False
-                    try:
-                        resp = context.request.get(
-                            api_url,
-                            max_redirects=0,
-                            fail_on_status_code=False,
-                            headers={"Accept": "application/json"},
-                            timeout=15000,
-                        )
-                        authenticated = resp.status == 200
-                    except Error:
-                        authenticated = False
-
-                    if authenticated:
-                        context.storage_state(path=str(cfg.storage_state))
-                        cfg.storage_state.chmod(0o600)
-                        context.close()
-                        print(
-                            f"[atlassian-browser-auth] Login successful for {service}. Cookies saved.",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                        return {
-                            "status": "ok",
-                            "service": service,
-                            "storage_state": str(cfg.storage_state),
-                        }
-                    time.sleep(1.5)
-            except Error as exc:
-                context.close()
-                raise RuntimeError(
-                    f"Browser closed unexpectedly during {service} login: {exc}"
-                ) from exc
-
-            try:
-                safe_url = urlunparse(urlparse(page.url)._replace(query="", fragment=""))
-            except Error:
-                safe_url = "(unknown)"
-            context.close()
-            raise RuntimeError(
-                "Timed out waiting for Atlassian login to complete. "
-                f"Last page: {safe_url}. "
-                f"Increase ATLASSIAN_LOGIN_TIMEOUT_SECONDS (current: {cfg.login_timeout_seconds}s) "
-                "or check that JIRA_URL/CONFLUENCE_URL match your post-login redirect."
-            )
-
 
 def _load_storage_state(path: Path) -> dict[str, Any]:
-    """Load and validate the Playwright storage state JSON file."""
+    """Load and validate the storage state JSON file (Playwright-compatible)."""
     try:
         data = json.loads(path.read_text())
     except FileNotFoundError as exc:
@@ -598,7 +240,7 @@ def _apply_storage_state_cookies(
     storage_state: dict[str, Any],
     base_url: str,
 ) -> None:
-    """Apply cookies from Playwright storage state to a requests session."""
+    """Apply cookies from storage state to a requests session."""
     session.cookies.clear()
     now = time.time()
     for cookie in storage_state.get("cookies", []):
@@ -662,7 +304,13 @@ def looks_like_sso_response(response: requests.Response) -> bool:
 
 
 class BrowserCookieSession(requests.Session):
-    """Requests session that refreshes itself through the Playwright browser profile."""
+    """Requests session backed by cookies captured out-of-band.
+
+    Cookies come from the saved storage-state jar (written by
+    ``atlassian-cli import`` from the browser-extension export) or from an
+    auto-harvested live browser session. This session NEVER opens a browser: on
+    a cache miss or auth failure it raises :class:`AuthRequiredError`.
+    """
 
     def __init__(
         self,
@@ -675,13 +323,10 @@ class BrowserCookieSession(requests.Session):
         self.service = service
         self.base_url = base_url.rstrip("/")
         self.browser_config = config or BrowserAuthConfig.from_env(service)
-        # When False, this session NEVER launches a browser. It only reads the
-        # saved cookie jar and, on a cache miss or auth failure, raises
-        # AuthRequiredError instead of blocking on interactive_login(). This is
-        # what makes the MCP server safe: an interactive login from inside a
-        # detached, async-dispatched server process is exactly what caused the
-        # server to hang forever. The CLI keeps allow_interactive=True so
-        # `atlassian-cli login` can still open a browser in the foreground.
+        # Retained for API compatibility (the MCP server passes False). It no
+        # longer gates a browser launch — NO code path here opens a browser or
+        # drives Playwright anymore; login happens out-of-band via the extension
+        # + `atlassian-cli import`. Kept so existing callers need no change.
         self.allow_interactive = allow_interactive
         self.trust_env = False
         self.headers.update({
@@ -696,7 +341,7 @@ class BrowserCookieSession(requests.Session):
         try:
             self.refresh_cookies()
         except AuthRequiredError:
-            # Non-interactive mode with no saved session: re-raise so the caller
+            # No saved session and nothing to harvest: re-raise so the caller
             # (e.g. the MCP server) gets an immediate, clear "log in" signal
             # instead of a half-built session that fails opaquely on first use.
             raise
@@ -704,23 +349,22 @@ class BrowserCookieSession(requests.Session):
             logger.debug("Cookie loading failed for %s", service, exc_info=True)
             print(
                 f"[atlassian-browser-auth] Could not load browser cookies for {service}: {exc}. "
-                "Run `atlassian-cli login` to authenticate.",
+                "Export cookies with the browser extension and run `atlassian-cli import`.",
                 file=sys.stderr,
                 flush=True,
             )
 
     def refresh_cookies(self) -> None:
-        """Reload cookies from storage state, harvesting or logging in if needed.
+        """Reload cookies from the saved jar, harvesting from a live browser if needed.
 
         Order of preference:
           1. A valid saved storage-state jar (fast path, no work).
           2. Auto-harvest: reuse a LIVE session from any installed browser
-             (Arc/Chrome/Brave/...). This opens no window and is bounded, so it
-             runs in BOTH interactive and server (allow_interactive=False) modes
-             — letting the server self-heal silently when a browser has a live
-             session, instead of failing fast on the first missing jar.
-          3. Interactive SSO in a visible browser — ONLY when allow_interactive
-             and harvest found nothing. The server never reaches this branch.
+             (Arc/Brave/...) whose cookies are still readable off disk. This
+             opens no window and is bounded.
+        No browser window is ever opened. On a miss, raises AuthRequiredError so
+        the caller tells the user to export cookies with the extension and run
+        `atlassian-cli import`.
         """
         if not self.browser_config.storage_state.exists():
             # Try harvesting a live session from any browser first (no UI, bounded).
@@ -728,21 +372,9 @@ class BrowserCookieSession(requests.Session):
                 storage_state = _load_storage_state(self.browser_config.storage_state)
                 _apply_storage_state_cookies(self, storage_state, self.base_url)
                 return
-            # Non-interactive (server) mode: never open a browser — fail fast
-            # with a clear instruction instead of blocking the caller.
-            if not self.allow_interactive:
-                raise AuthRequiredError(self.service)
-            if not sys.stdin.isatty() and not os.environ.get("DISPLAY") and sys.platform != "darwin":
-                print(
-                    "[atlassian-browser-auth] WARNING: No display available (headless environment). "
-                    "Run `atlassian-cli login` manually or set ATLASSIAN_BROWSER_AUTH_ENABLED=false for token auth.",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                return
-            interactive_login(self.service, config=self.browser_config)
-        if not self.browser_config.storage_state.exists():
-            return
+            # Nothing on disk and nothing to harvest: fail fast with a clear
+            # instruction instead of blocking the caller.
+            raise AuthRequiredError(self.service)
         storage_state = _load_storage_state(self.browser_config.storage_state)
         _apply_storage_state_cookies(self, storage_state, self.base_url)
 
@@ -791,69 +423,42 @@ class BrowserCookieSession(requests.Session):
         return False
 
     def request(self, method: str, url: str, *args: Any, **kwargs: Any) -> requests.Response:
-        """Make a request, automatically re-authenticating on SSO redirects or 401s."""
+        """Make a request, re-loading cookies once on an SSO redirect or 401.
+
+        On a re-auth signal we NEVER open a browser. We reload the saved jar (a
+        separate `atlassian-cli import` may have refreshed it), retry, and if
+        still stale try harvesting a live session from another browser. If
+        nothing authenticates, raise AuthRequiredError so the caller can tell the
+        user to re-export cookies with the extension.
+        """
         retry_on_auth = kwargs.pop("_retry_on_auth", True)
         response = super().request(method, url, *args, **kwargs)
         needs_reauth = looks_like_sso_response(response) or response.status_code == 401
-        if retry_on_auth and needs_reauth:
-            response.close()
-            # Non-interactive (server) mode: the cookies on disk may have been
-            # refreshed by a separate `atlassian-cli login`, so reload them once
-            # and retry — but NEVER open a browser here. If still unauthorized,
-            # raise so the caller can tell the user to log in out-of-band.
-            if not self.allow_interactive:
-                with _LOGIN_LOCK:
-                    self.refresh_cookies()  # reload from disk; raises if absent
-                    retest = super().request(method, url, *args, **kwargs)
-                    if looks_like_sso_response(retest) or retest.status_code == 401:
-                        # Disk jar is also stale. Try harvesting a fresh live
-                        # session from another browser (bounded, no UI) before
-                        # giving up — this is how the server self-heals when the
-                        # user re-authed in their normal browser.
-                        retest.close()
-                        if self._try_auto_harvest():
-                            storage_state = _load_storage_state(
-                                self.browser_config.storage_state
-                            )
-                            _apply_storage_state_cookies(self, storage_state, self.base_url)
-                            retest = super().request(method, url, *args, **kwargs)
-                if not looks_like_sso_response(retest) and retest.status_code != 401:
-                    return retest
+        if not (retry_on_auth and needs_reauth):
+            return response
+
+        response.close()
+        with _LOGIN_LOCK:
+            # Reload from disk; refresh_cookies raises AuthRequiredError if the
+            # jar is absent and nothing can be harvested.
+            self.refresh_cookies()
+            retest = super().request(method, url, *args, **kwargs)
+            if looks_like_sso_response(retest) or retest.status_code == 401:
+                # Disk jar is also stale. Try harvesting a fresh live session
+                # from another browser (bounded, no UI) before giving up — this
+                # is how we self-heal when the user re-authed in their normal
+                # browser.
                 retest.close()
-                raise AuthRequiredError(self.service)
-            with _LOGIN_LOCK:
-                self.refresh_cookies()
-                retest = super().request(method, url, *args, **kwargs)
-                if not looks_like_sso_response(retest) and retest.status_code != 401:
-                    return retest
-                retest.close()
-                # Disk jar stale too — try harvesting a live session from another
-                # browser before opening a visible login window.
                 if self._try_auto_harvest():
-                    storage_state = _load_storage_state(self.browser_config.storage_state)
+                    storage_state = _load_storage_state(
+                        self.browser_config.storage_state
+                    )
                     _apply_storage_state_cookies(self, storage_state, self.base_url)
-                    retest2 = super().request(method, url, *args, **kwargs)
-                    if not looks_like_sso_response(retest2) and retest2.status_code != 401:
-                        return retest2
-                    retest2.close()
-                # Re-auth interactively, REUSING the existing browser profile.
-                # We deliberately do NOT delete profile_dir here: the persistent
-                # Chrome profile holds the user's long-lived SSO/MFA session (and,
-                # when seeded, their password manager extension login), so wiping
-                # it on a transient 401 is what caused sessions to be silently
-                # lost. Only the short-lived storage-state cache is refreshed below.
-                if self.browser_config.storage_state.exists():
-                    self.browser_config.storage_state.unlink()
-                interactive_login(self.service, config=self.browser_config)
-                self.refresh_cookies()
-            return self.request(
-                method,
-                url,
-                *args,
-                _retry_on_auth=False,
-                **kwargs,
-            )
-        return response
+                    retest = super().request(method, url, *args, **kwargs)
+        if not looks_like_sso_response(retest) and retest.status_code != 401:
+            return retest
+        retest.close()
+        raise AuthRequiredError(self.service)
 
 
 def create_browser_session(
@@ -864,9 +469,9 @@ def create_browser_session(
 ) -> BrowserCookieSession:
     """Create a BrowserCookieSession for the given Atlassian service.
 
-    Pass allow_interactive=False for server contexts (e.g. the MCP server) so
-    the session reads saved cookies but never opens a browser — it raises
-    AuthRequiredError on a cache miss instead of hanging.
+    ``allow_interactive`` is retained for API compatibility (the MCP server
+    passes False); no code path opens a browser regardless. The session reads
+    saved/harvested cookies and raises AuthRequiredError on a cache miss.
     """
     return BrowserCookieSession(
         service=service,

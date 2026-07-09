@@ -2,70 +2,75 @@
 
 ## Project Overview
 
-MCP server wrapping upstream [mcp-atlassian](https://github.com/sooperset/mcp-atlassian) with browser-cookie authentication via Playwright. Designed for Atlassian Server/Data Center instances behind corporate SSO where API tokens are not available.
+MCP server wrapping upstream [mcp-atlassian](https://github.com/sooperset/mcp-atlassian) with browser-cookie authentication. Cookies are captured out-of-band — exported from real Chrome by a bundled Chrome extension (`chrome-extension/`) or auto-harvested from a live browser — so it works for Atlassian **Cloud** (`*.atlassian.net`) and Server/Data Center instances behind corporate SSO where API tokens are unavailable. **No Playwright, no browser automation.**
 
 ## Architecture
 
-- `atlassian_browser_mcp_full.py` — MCP entrypoint. Monkey-patches upstream `JiraClient` and `ConfluenceClient` constructors to inject browser-backed sessions. Registers `atlassian_login` tool. Runs the MCP server.
-- `atlassian_browser_auth.py` — Shared auth core: `BrowserCookieSession` (requests.Session subclass), `interactive_login()`, profile seeding, SSO redirect detection. Both the MCP server and the CLI use this.
-- `atlassian_cli.py` + `atlassian-cli` — Command-line front-end over the same auth core (Jira/Confluence get/search, login). Preferred for agents and scripting; no MCP transport involved. See `AGENT_USAGE.md`.
+- `atlassian_browser_mcp_full.py` — MCP entrypoint. Monkey-patches upstream `JiraClient` and `ConfluenceClient` constructors to inject browser-cookie sessions. Registers `atlassian_login` tool (returns instructions only). Runs the MCP server.
+- `atlassian_browser_auth.py` — Shared auth core: `BrowserCookieSession` (requests.Session subclass), saved-jar loading, live-cookie auto-harvest, SSO redirect detection. **Never opens a browser.** Both the MCP server and the CLI use this.
+- `atlassian_cli.py` + `atlassian-cli` — Command-line front-end over the same auth core (Jira/Confluence get/search; `import` loads extension-exported cookies; `login` reuses or points to a live session). Preferred for agents and scripting; no MCP transport involved. See `AGENT_USAGE.md`.
+- `chrome-extension/` — Manifest V3 Chrome extension. Reads live cookies via `chrome.cookies.getAll` and exports them as JSON for `atlassian-cli import`. The supported way to reuse a modern-Chrome session (Chrome 127+ app-bound cookies can't be read off disk).
+- `cookie_harvest.py` / `cookie_autoauth.py` — no-window harvest of live cookies from installed Chromium-family browsers (Arc/Brave/Edge/…) via their macOS Keychain key; used as a fallback when cookies are readable off disk.
 - `run-atlassian-browser-mcp.sh` — MCP launcher: creates venv via `uv`, installs deps, runs upstream compatibility check, starts server.
 
-## ⚠️ Two-process architecture: the server NEVER opens a browser
+## ⚠️ The server NEVER opens a browser (nothing here does)
 
-Authentication and serving are **deliberately separate jobs**:
+Capturing cookies and serving REST calls are **separate jobs**, and **no part of
+this tool opens a browser or drives Playwright** — Playwright has been removed
+entirely.
 
-- **Authentication is interactive and slow** → done **only** by the CLI in the
-  foreground (`atlassian-cli login <jira|confluence>`), where a browser can
-  actually open. `BrowserCookieSession(allow_interactive=True)` (the CLI
-  default) may call `interactive_login()`.
-- **Serving is fast, stateless HTTP** → the MCP server constructs sessions with
-  `allow_interactive=False`. Such a session reads the saved cookie jar and, on a
-  cache miss or 401, raises `AuthRequiredError` **immediately** ("run
-  `atlassian-cli login …`") instead of launching a browser.
+- **Capturing cookies is out-of-band**: the user exports cookies with the Chrome
+  extension (`chrome-extension/`) and loads them via `atlassian-cli import`, or a
+  live session is auto-harvested from a readable browser. Interactive login is
+  not something this tool performs.
+- **Serving is fast, stateless HTTP**: `BrowserCookieSession` reads the saved
+  cookie jar (auto-harvesting once if the jar is missing) and, on a cache miss or
+  401, raises `AuthRequiredError` **immediately** ("export cookies and run
+  `atlassian-cli import`") instead of blocking.
 
 **Why this exists (the bug it fixes):** the server used to call
-`interactive_login()` from inside its detached, async-dispatched process. That
-(a) blocked the tool call up to `ATLASSIAN_LOGIN_TIMEOUT_SECONDS` (≈5 min, often
-forever) waiting for a human who can't see the window, and (b) ran
-`sync_playwright()` on the asyncio event loop, which deadlocks ("Playwright Sync
-API inside the asyncio loop"). Net effect: **MCP Atlassian calls hung forever.**
+`interactive_login()` (Playwright) from inside its detached, async-dispatched
+process. That (a) blocked the tool call waiting for a human who couldn't see the
+window, and (b) ran `sync_playwright()` on the asyncio event loop, which
+deadlocks ("Playwright Sync API inside the asyncio loop"). Net effect: MCP
+Atlassian calls hung forever. Removing Playwright and moving capture to the
+extension eliminates that hang class entirely.
 
 **Hard rules — do not regress:**
-- The MCP server (`_patch_*_client_init`, `atlassian_login` tool) must NEVER
-  call `interactive_login()` or otherwise drive Playwright in-process. The
+- No code path (server or CLI) may drive Playwright or open a browser. The
   `atlassian_login` tool returns instructions only.
-- Any new server-side session must pass `allow_interactive=False`.
-- Login happens out-of-band via the CLI; the server reuses the saved jar.
+- Any new session must resolve cookies from the saved jar or auto-harvest, never
+  by launching a UI.
+- `allow_interactive` on `BrowserCookieSession` / `create_browser_session` is
+  retained for API compatibility only; it no longer gates a browser launch
+  (there is none).
 
-## ⚠️ Authentication: ALWAYS reuse the browser profile (do not re-enter user/pw)
+## ⚠️ Authentication: reuse the real session via the extension (do not re-enter user/pw)
 
-Re-entering corporate username/password + MFA on every run is a real pain and
-must be avoided. The whole point of this tool is a **persistent, reusable
-session**. Two rules make that reliable:
+Re-entering corporate username/password + MFA on every run must be avoided; the
+whole point is a **persistent, reusable session**. How it stays reliable:
 
-1. **Seed from the user's real Chrome profile.** On first login, set
-   `ATLASSIAN_SEED_FROM_CHROME_PROFILE=Default` (or another profile name / an
-   absolute path). This copies the real Chrome profile **once** — cookies, saved
-   logins, and any password-manager extension — into the dedicated automation
-   profile (`.atlassian-browser-profile/`). Because the user's live corporate
-   SSO cookies come along, the first login typically completes **hands-free**,
-   no password and no MFA prompt. Chrome 136+ refuses to drive the live profile
-   in place, so seeding a copy is the supported way to reuse it.
-2. **NEVER delete the browser profile on an auth failure.** A previous version
-   ran `shutil.rmtree(profile_dir)` on a transient 401, which silently destroyed
-   the long-lived SSO session and forced a full manual re-login every time.
-   That self-wipe has been removed and must not come back. On re-auth, only the
-   short-lived per-service cookie cache (`.atlassian-browser-state-<svc>.json`)
-   is refreshed; the profile is preserved so re-login stays instant.
+1. **Export from real Chrome with the extension.** `chrome-extension/` reads the
+   live cookie store via `chrome.cookies.getAll` (plaintext, incl. HttpOnly), so
+   it reuses whatever SSO session Chrome already has — no password, no MFA
+   re-prompt. This is the supported path because **Chrome 127+ "app-bound"
+   cookies cannot be decrypted off disk**, which is exactly why reading the
+   cookie SQLite DB (`cookie_harvest.py`) fails for modern Chrome and why
+   Playwright was previously needed.
+2. **Auto-harvest still covers Arc/Brave/etc.** where cookies remain readable off
+   disk — no export needed there.
+3. **NEVER delete the cookie jars on an auth failure.** On re-auth, only the
+   short-lived per-service cache (`.atlassian-browser-state-<svc>.json`) is
+   rewritten from a fresh export/harvest; nothing long-lived is wiped.
 
 Jira and Confluence keep **separate cookie jars** (`*-state-jira.json`,
-`*-state-confluence.json`) but **share one browser profile**, so a single seeded
-SSO session covers both services. All `.atlassian-browser-*` artifacts hold live
+`*-state-confluence.json`). On Atlassian Cloud they share one host, so a single
+extension export covers both; `import` writes both jars. All
+`.atlassian-browser-*` artifacts and `atlassian-cookies*.json` exports hold live
 credentials and are git-ignored — never commit them.
 
 Operational how-to (commands, env vars) lives in [`AGENT_USAGE.md`](AGENT_USAGE.md);
-this section is the rationale and the two hard rules.
+this section is the rationale and the hard rules.
 
 ## Key Design Decisions
 
