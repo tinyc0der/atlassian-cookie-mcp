@@ -32,9 +32,9 @@ Only the latest version receives security updates. We recommend always running t
 
 ### Authentication
 
-- **Browser-cookie SSO** - No API tokens or passwords stored in config; cookies are captured out-of-band (Chrome extension export or live-browser harvest), never by driving a browser
+- **Browser-cookie SSO** - No API tokens or passwords stored in config; cookies are captured out-of-band by the Chrome extension export, never by driving a browser
 - **Local storage state** - Cookies persisted locally in gitignored per-service jars
-- **Automatic session refresh** - SSO redirect / 401 detection reloads cookies (and can re-harvest a live session); no browser is ever opened
+- **Automatic session refresh** - SSO redirect / 401 detection reloads cookies from the saved jar; no browser is ever opened
 - **Configurable SSO markers** - Adapt detection to your identity provider
 
 ### Data Protection

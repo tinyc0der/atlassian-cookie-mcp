@@ -8,11 +8,10 @@ into the cookie jar the MCP server and CLI reuse.
 
 Reading cookies from Chrome's on-disk SQLite DB no longer works for modern
 Chrome: **Chrome 127+ "app-bound encryption" (v20)** seals the cookie key to the
-Chrome app, so values can't be decrypted out of band (see
-`../cookie_harvest.py`). This extension sidesteps that entirely — running *inside*
-Chrome, `chrome.cookies.getAll` returns the cookies in **plaintext**, including
-**HttpOnly** session cookies, with no decryption, no Keychain, and no browser
-automation.
+Chrome app, so values can't be decrypted out of band. This extension sidesteps
+that entirely — running *inside* Chrome, `chrome.cookies.getAll` returns the
+cookies in **plaintext**, including **HttpOnly** session cookies, with no
+decryption, no Keychain, and no browser automation.
 
 It reads cookies with the `{ url }` filter, so it captures exactly what the
 browser would send to your Jira/Confluence host — including parent-domain

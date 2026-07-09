@@ -10,13 +10,13 @@
 [![mcp-atlassian](https://img.shields.io/badge/wraps-mcp--atlassian%200.x-blue?style=flat-square)](https://github.com/sooperset/mcp-atlassian)
 [![GeiserX/atlassian-browser-mcp MCP server](https://glama.ai/mcp/servers/GeiserX/atlassian-browser-mcp/badges/score.svg)](https://glama.ai/mcp/servers/GeiserX/atlassian-browser-mcp)
 
-MCP server that wraps the upstream [mcp-atlassian](https://github.com/sooperset/mcp-atlassian) toolset with browser-cookie authentication. Cookies are captured from your real Chrome by a bundled **Chrome extension** (or auto-harvested from a live browser) — **no Playwright, no browser automation.** Works for Atlassian **Cloud** (`*.atlassian.net`) and Server/Data Center behind corporate SSO (Okta, SAML, etc.) where API tokens are not available.
+MCP server that wraps the upstream [mcp-atlassian](https://github.com/sooperset/mcp-atlassian) toolset with browser-cookie authentication. Cookies are captured from your real Chrome by a bundled **Chrome extension** — **no Playwright, no browser automation.** Works for Atlassian **Cloud** (`*.atlassian.net`) and Server/Data Center behind corporate SSO (Okta, SAML, etc.) where API tokens are not available.
 
 ## How it works
 
 Capturing cookies and serving data are **separate**, and there is **no browser automation** anywhere — this is what keeps the MCP server from hanging:
 
-1. **Capture cookies with the Chrome extension.** Load `chrome-extension/` unpacked, click **Export**, and it reads your live Jira/Confluence cookies (plaintext, incl. HttpOnly) via `chrome.cookies.getAll` into a JSON file. Then `atlassian-cli import atlassian-cookies.json` loads them into per-service cookie jars. If your live session is in Arc/Brave, `atlassian-cli login` can auto-harvest it instead — no export needed.
+1. **Capture cookies with the Chrome extension.** Load `chrome-extension/` unpacked, click **Export**, and it reads your live Jira/Confluence cookies (plaintext, incl. HttpOnly) via `chrome.cookies.getAll` into a JSON file. Then `atlassian-cli import atlassian-cookies.json` loads them into per-service cookie jars.
 2. **The MCP server serves data only.** It reads the saved cookies via a custom `requests.Session` subclass and never opens a browser. On a missing/expired session it fails fast with an `AuthRequiredError` telling you to re-export — it does **not** block.
 
 > ⚠️ Earlier versions launched a Playwright login browser from inside the server. Because the server is detached and async, that blocked tool calls for minutes (often forever) and could deadlock Playwright's sync API on the event loop. Moving capture to the extension removes that failure mode — and removes the need to read Chrome's on-disk cookie DB, which Chrome 127+ "app-bound" encryption blocks.
@@ -28,8 +28,8 @@ The server monkey-patches `JiraClient` and `ConfluenceClient` constructors in `m
 | File | Purpose |
 |------|---------|
 | `atlassian_browser_mcp_full.py` | MCP entrypoint. Patches upstream clients, registers `atlassian_login` tool, runs the MCP server |
-| `atlassian_browser_auth.py` | Shared auth core: `BrowserCookieSession`, saved-jar loading, live-cookie auto-harvest, SSO detection. Never opens a browser |
-| `atlassian_cli.py` + `atlassian-cli` | Command-line front-end (Jira/Confluence get/search; `import` loads extension cookies; `login` reuses a live session). Great for scripts and agents — see [`AGENT_USAGE.md`](AGENT_USAGE.md) |
+| `atlassian_browser_auth.py` | Shared auth core: `BrowserCookieSession`, saved-jar loading, `write_storage_state`/`probe_live`, SSO detection. Never opens a browser |
+| `atlassian_cli.py` + `atlassian-cli` | Command-line front-end (Jira/Confluence get/search; `import` loads extension cookies into the jars). Great for scripts and agents — see [`AGENT_USAGE.md`](AGENT_USAGE.md) |
 | `chrome-extension/` | Manifest V3 Chrome extension that exports your live cookies to JSON for `atlassian-cli import` — see [`chrome-extension/README.md`](chrome-extension/README.md) |
 | `run-atlassian-browser-mcp.sh` | MCP launcher: creates venv, installs deps via `uv`, runs compatibility check, starts server |
 | `pyproject.toml` | Dependency pins |
@@ -59,7 +59,6 @@ export JIRA_URL="https://yourco.atlassian.net"
 export CONFLUENCE_URL="https://yourco.atlassian.net"   # Cloud: same host
 
 ./atlassian-cli import ~/Downloads/atlassian-cookies.json   # after extension Export
-./atlassian-cli login jira                                  # or auto-harvest Arc/Brave
 ./atlassian-cli jira get PROJ-123 --comments
 ./atlassian-cli jira search 'project = PROJ AND status = "In Progress"'
 ./atlassian-cli confluence get 123456789 --markdown -o page.md
@@ -91,9 +90,8 @@ Add to your Claude Code, Cursor, or other MCP client configuration:
 ```
 
 The server never opens a browser. Capture cookies once with the extension +
-`atlassian-cli import` (or `atlassian-cli login` to auto-harvest a live
-Arc/Brave session); all MCP tool calls then proceed using the saved session, and
-a missing/expired session fails fast with a clear re-export message.
+`atlassian-cli import`; all MCP tool calls then proceed using the saved session,
+and a missing/expired session fails fast with a clear re-export message.
 
 ### Environment variables
 
@@ -102,8 +100,6 @@ a missing/expired session fails fast with a clear re-export message.
 | `JIRA_URL` | _(required)_ | Jira base URL (e.g. `https://yourco.atlassian.net`) |
 | `CONFLUENCE_URL` | _(required)_ | Confluence base URL (e.g. `https://yourco.atlassian.net`). For Cloud (`*.atlassian.net`) the `/wiki` context path is appended automatically |
 | `ATLASSIAN_BROWSER_AUTH_ENABLED` | `true` | Enable browser-cookie auth (set `false` to fall back to token auth) |
-| `ATLASSIAN_COOKIE_HARVEST` | `true` | Master switch for auto-harvest from a live browser. Set falsy to use only the saved/imported jar |
-| `ATLASSIAN_COOKIE_SOURCE_BROWSERS` | _(all installed)_ | Comma list of browsers to harvest from, in order (e.g. `arc,chrome`). Also acts as an allow-list |
 | `ATLASSIAN_STORAGE_STATE` | `./.atlassian-browser-state-{service}.json` | Cookie-jar file. Per-service by default; an explicit value is still namespaced per service |
 | `ATLASSIAN_SSO_MARKERS` | _(auto)_ | Comma-separated URL/text markers for SSO redirect detection. Defaults cover Okta, ADFS, Azure AD, PingOne, Google SAML |
 | `ATLASSIAN_BROWSER_USER_AGENT` | _(Chrome 136)_ | Custom User-Agent string for API requests and liveness probes |
@@ -113,17 +109,16 @@ a missing/expired session fails fast with a clear re-export message.
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (for dependency management)
-- Google Chrome (or another Chromium-family browser) to capture the session — via the extension, or auto-harvest for Arc/Brave
+- Google Chrome (or another Chromium-family browser) to run the extension and capture the session
 - Network access to your Atlassian instance
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Tools return `AuthRequiredError` / "not authenticated" | No saved session, and no readable live browser session | Export cookies with the extension, then `atlassian-cli import <file>` |
+| Tools return `AuthRequiredError` / "not authenticated" | No saved session (jar missing or expired) | Export cookies with the extension, then `atlassian-cli import <file>` |
 | `import` reports HTTP 401/302 (not live) | Exported cookies are already expired | Sign into Jira/Confluence in Chrome, re-**Export**, and `import` again |
 | No cookies match your hosts on `import` | `JIRA_URL`/`CONFLUENCE_URL` don't match the exported cookies' domain | Fix the env vars to point at the same instance you exported from |
-| `atlassian-cli login` finds no live session | Your session is only in modern Chrome (app-bound cookies) | Use the extension export path instead of auto-harvest |
 | "Load unpacked" is greyed out | Managed/corporate Chrome blocks unpacked extensions | Ask IT to allowlist the extension, or pack & self-host it (see `chrome-extension/README.md`) |
 | "Upstream compatibility check failed" | `mcp-atlassian` version changed its internal API | Pin to a compatible version or update the wrapper |
 

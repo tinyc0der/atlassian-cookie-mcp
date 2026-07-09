@@ -1,40 +1,24 @@
 # Atlassian access for agents (Jira + Confluence)
 
-**TL;DR for an AI agent:** use the CLI at `./atlassian-cli`. It reuses an
-existing Jira/Confluence session — first by **auto-harvesting live cookies from a
-readable browser** (Arc, Brave, Edge, …), and otherwise from cookies you export
-once with the **Chrome extension** (`chrome-extension/`) and load via
-`atlassian-cli import`. **No browser is ever opened by this tool.** Read this
-file, then run the commands below. Do **not** rebuild or reconfigure anything —
-it already works once `JIRA_URL` / `CONFLUENCE_URL` are set and a session is
-imported.
+**TL;DR for an AI agent:** use the CLI at `./atlassian-cli`. It reuses an existing
+Jira/Confluence session from cookies you export once with the **Chrome extension**
+(`chrome-extension/`) and load via `atlassian-cli import`. **No browser is ever
+opened by this tool.** Read this file, then run the commands below. Do **not**
+rebuild or reconfigure anything — it already works once `JIRA_URL` /
+`CONFLUENCE_URL` are set and a session is imported.
 
 ## How auth resolves (the order — this is the whole design)
 
 1. **Saved cookie jar** still valid → used immediately, no work.
-2. **Auto-harvest** (`cookie_autoauth.py` → `cookie_harvest.py`): scans every
-   installed Chromium-family browser, decrypts its Jira/Confluence cookies via
-   that browser's macOS Keychain key, and probes the REST API with a **bounded**
-   request. The first browser that answers HTTP 200 wins; its cookies are saved
-   as the jar. **No window opens, nothing hangs.** Note: **modern Chrome (127+)
-   cookies are "app-bound" and cannot be read off disk**, so if your live
-   session is only in Chrome, harvest finds nothing — use the extension (below).
-3. **Browser-extension export** — the reliable path for Chrome: load
-   `chrome-extension/` unpacked, click **Export**, then
-   `atlassian-cli import ~/Downloads/atlassian-cookies.json`. The extension reads
-   cookies from Chrome's live cookie store (plaintext, incl. HttpOnly), so it is
-   immune to the app-bound-encryption problem. See
+2. **Browser-extension export** — load `chrome-extension/` unpacked, click
+   **Export**, then `atlassian-cli import ~/Downloads/atlassian-cookies.json`. The
+   extension reads cookies from Chrome's live cookie store (plaintext, incl.
+   HttpOnly) via `chrome.cookies.getAll`, so it is immune to the Chrome 127+
+   app-bound-encryption problem that blocks reading the cookie DB off disk. See
    [`chrome-extension/README.md`](chrome-extension/README.md).
 
-The MCP **server never opens a window** (it can harvest silently, but on a true
-miss it raises "export cookies and run `atlassian-cli import`" instead of
-hanging).
-
-**Diagnose first, don't guess:** to see exactly which browsers have readable
-cookies and whether any session is live, run `python3 cookie_autoauth.py jira`
-(or `confluence`) — it prints a per-browser line like `arc/Default: 7 cookies ->
-HTTP 200`. If it says no browser is live (common when your session is only in
-modern Chrome), export with the extension and `import`.
+The MCP **server never opens a window**: on a missing/expired jar it raises
+"export cookies and run `atlassian-cli import`" instead of hanging.
 
 ## Why this exists
 
@@ -73,9 +57,7 @@ Confluence URLs, so the bare tenant host works.
    ./atlassian-cli import ~/Downloads/atlassian-cookies.json
    ```
 
-If your live session already lives in Arc/Brave, you can skip the extension and
-just run `./atlassian-cli login jira` — it auto-harvests that session. Re-export
-and re-`import` whenever the session expires.
+Re-export and re-`import` whenever the session expires.
 
 ## Daily commands (no browser opens)
 
@@ -95,20 +77,15 @@ and re-`import` whenever the session expires.
 
 ## If a command says it can't authenticate
 
-First, the tool already tried the saved jar and an auto-harvest and found
-nothing live. Confirm what's actually there:
-
-```bash
-python3 cookie_autoauth.py jira        # per-browser cookie + live-probe report
-```
-
-- If a browser shows `-> HTTP 200`, auth will just work (re-run your command).
-- If all show non-200 or "no matching cookies" (typical when your session is only
-  in modern Chrome), **re-export with the extension** and import:
+The saved jar is missing or the session expired. Re-export with the extension
+(sign into Jira/Confluence in Chrome first if needed) and import again:
 
 ```bash
 ./atlassian-cli import ~/Downloads/atlassian-cookies.json
 ```
+
+The `import` command probes the REST API and prints `HTTP 200 (live)` on success,
+or a clear "NOT live — re-export" message if the cookies are already expired.
 
 ## Files (all git-ignored, local only)
 
@@ -124,8 +101,6 @@ python3 cookie_autoauth.py jira        # per-browser cookie + live-probe report
 | --- | --- | --- |
 | `JIRA_URL` | (required) | Jira base URL |
 | `CONFLUENCE_URL` | (required) | Confluence base URL |
-| `ATLASSIAN_COOKIE_HARVEST` | `true` | Master switch for auto-harvest. Set falsy to disable and use only the saved jar / imported cookies. |
-| `ATLASSIAN_COOKIE_SOURCE_BROWSERS` | (all installed) | Comma list of browsers to harvest from, in order, e.g. `arc,chrome`. Acts as an allow-list. Known: arc, brave, vivaldi, edge, opera, chrome, chromium, dia. |
 | `ATLASSIAN_STORAGE_STATE` | (per-service default) | Override the cookie-jar path; namespaced per service. |
 | `ATLASSIAN_BROWSER_USER_AGENT` | Chrome UA | User-Agent used for REST requests and liveness probes. |
 

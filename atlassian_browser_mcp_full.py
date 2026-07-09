@@ -277,9 +277,8 @@ def atlassian_login(
 
         atlassian-cli import ~/Downloads/atlassian-cookies.json
 
-    Or, if a live session exists in Arc/Brave, `atlassian-cli login <target>`
-    auto-harvests it. Once the jar is saved, the server's tools reuse it
-    automatically — no browser is ever opened from within the server.
+    Once the jar is saved, the server's tools reuse it automatically — no browser
+    is ever opened from within the server.
     """
     cli = os.path.join(os.path.dirname(os.path.abspath(__file__)), "atlassian-cli")
     return {
@@ -289,7 +288,6 @@ def atlassian_login(
             f"Authentication for {target} is done out-of-band to keep the server "
             f"non-blocking. Export cookies with the Chrome extension (chrome-extension/), "
             f"then run:  {cli} import <atlassian-cookies.json>  and retry. "
-            f"(Or `{cli} login {target}` to auto-harvest a live Arc/Brave session.) "
             f"The server reuses the saved session and never opens a browser itself."
         ),
         "command": f"{cli} import <atlassian-cookies.json>",

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Shared browser-cookie authentication helpers for Atlassian requests.
 
-Cookies are captured OUT-OF-BAND (the Chrome extension in ``chrome-extension/``
-exports them; ``atlassian-cli import`` loads them) or auto-harvested from a live
-browser session (``cookie_autoauth``). Nothing here ever opens a browser window
-or drives Playwright — on a cache miss it raises :class:`AuthRequiredError`.
+Cookies are captured OUT-OF-BAND: the Chrome extension in ``chrome-extension/``
+exports them and ``atlassian-cli import`` loads them into the jar this module
+reads. Nothing here ever opens a browser window or drives Playwright — on a
+cache miss it raises :class:`AuthRequiredError`.
 """
 
 from __future__ import annotations
@@ -42,14 +42,13 @@ class AuthRequiredError(RuntimeError):
         super().__init__(
             f"Not authenticated for {service}. Export cookies with the Atlassian "
             f"Cookie Exporter browser extension, then run "
-            f"`atlassian-cli import <file>` to load them (or sign into {service} "
-            f"in Arc/Brave and retry to auto-harvest a live session). The server "
-            f"never opens a browser itself."
+            f"`atlassian-cli import <file>` to load them. The server never opens "
+            f"a browser itself."
         )
 
 
-# Serializes cookie refresh/harvest across threads so concurrent 401s don't
-# stampede the harvest + jar rewrite.
+# Serializes cookie reloads across threads so concurrent 401s don't stampede the
+# jar re-read.
 _LOGIN_LOCK = threading.Lock()
 
 _DEFAULT_SSO_MARKERS = (
@@ -303,13 +302,68 @@ def looks_like_sso_response(response: requests.Response) -> bool:
     return is_html and any(marker in body_sample for marker in markers)
 
 
+def write_storage_state(cookies: list[dict[str, Any]], path: Path) -> None:
+    """Persist cookies as a storage_state JSON (mode 0600), written atomically."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps({"cookies": cookies, "origins": []}, indent=2))
+    tmp.chmod(0o600)
+    tmp.replace(path)
+    path.chmod(0o600)
+
+
+# REST endpoints that return 200 only for an authenticated session and, when
+# logged out, 302-redirect to SSO (which, with redirects disabled, surfaces as a
+# non-200 — so only a genuine live session passes).
+_VERIFY_PATHS: dict[str, str] = {
+    "jira": "/rest/api/2/myself",
+    "confluence": "/rest/api/space?limit=1",
+}
+# Bounded (connect, read) so a dead endpoint can't hang the caller.
+_PROBE_TIMEOUT = (5, 8)
+
+
+def probe_live(
+    base_url: str,
+    service: ServiceName,
+    cookies: list[dict[str, Any]],
+    user_agent: str,
+) -> int:
+    """Return the HTTP status of a bounded, redirect-free liveness probe.
+
+    0 means the request could not be completed (timeout / connection error).
+    Never raises. Used by ``atlassian-cli import`` to confirm the cookies it just
+    wrote actually authenticate.
+    """
+    path = _VERIFY_PATHS[service]
+    sess = requests.Session()
+    sess.trust_env = False  # ignore ambient proxy env that could hijack the probe
+    sess.headers.update({"User-Agent": user_agent, "Accept": "application/json"})
+    for c in cookies:
+        try:
+            sess.cookies.set(
+                c["name"],
+                c["value"],
+                domain=str(c.get("domain", "")).lstrip("."),
+                path=c.get("path", "/"),
+            )
+        except Exception:  # noqa: BLE001 - a malformed cookie shouldn't kill the probe
+            continue
+    try:
+        resp = sess.get(f"{base_url}{path}", allow_redirects=False, timeout=_PROBE_TIMEOUT)
+        return resp.status_code
+    except requests.RequestException:
+        return 0
+    finally:
+        sess.close()
+
+
 class BrowserCookieSession(requests.Session):
     """Requests session backed by cookies captured out-of-band.
 
-    Cookies come from the saved storage-state jar (written by
-    ``atlassian-cli import`` from the browser-extension export) or from an
-    auto-harvested live browser session. This session NEVER opens a browser: on
-    a cache miss or auth failure it raises :class:`AuthRequiredError`.
+    Cookies come from the saved storage-state jar, written by ``atlassian-cli
+    import`` from the browser-extension export. This session NEVER opens a
+    browser: on a cache miss or auth failure it raises :class:`AuthRequiredError`.
     """
 
     def __init__(
@@ -341,9 +395,9 @@ class BrowserCookieSession(requests.Session):
         try:
             self.refresh_cookies()
         except AuthRequiredError:
-            # No saved session and nothing to harvest: re-raise so the caller
-            # (e.g. the MCP server) gets an immediate, clear "log in" signal
-            # instead of a half-built session that fails opaquely on first use.
+            # No saved session: re-raise so the caller (e.g. the MCP server) gets
+            # an immediate, clear "log in" signal instead of a half-built session
+            # that fails opaquely on first use.
             raise
         except Exception as exc:
             logger.debug("Cookie loading failed for %s", service, exc_info=True)
@@ -355,81 +409,24 @@ class BrowserCookieSession(requests.Session):
             )
 
     def refresh_cookies(self) -> None:
-        """Reload cookies from the saved jar, harvesting from a live browser if needed.
+        """Reload cookies from the saved storage-state jar.
 
-        Order of preference:
-          1. A valid saved storage-state jar (fast path, no work).
-          2. Auto-harvest: reuse a LIVE session from any installed browser
-             (Arc/Brave/...) whose cookies are still readable off disk. This
-             opens no window and is bounded.
-        No browser window is ever opened. On a miss, raises AuthRequiredError so
-        the caller tells the user to export cookies with the extension and run
-        `atlassian-cli import`.
+        No browser window is ever opened. On a missing jar, raises
+        AuthRequiredError so the caller tells the user to export cookies with the
+        extension and run `atlassian-cli import`.
         """
         if not self.browser_config.storage_state.exists():
-            # Try harvesting a live session from any browser first (no UI, bounded).
-            if self._try_auto_harvest():
-                storage_state = _load_storage_state(self.browser_config.storage_state)
-                _apply_storage_state_cookies(self, storage_state, self.base_url)
-                return
-            # Nothing on disk and nothing to harvest: fail fast with a clear
-            # instruction instead of blocking the caller.
             raise AuthRequiredError(self.service)
         storage_state = _load_storage_state(self.browser_config.storage_state)
         _apply_storage_state_cookies(self, storage_state, self.base_url)
-
-    def _try_auto_harvest(self) -> bool:
-        """Reuse a live session from any installed browser; write the jar if found.
-
-        Returns True iff a browser yielded an authenticated (HTTP 200) session
-        and its cookies were written to this service's storage-state path. Opens
-        no browser window and is fully bounded, so it is safe in server mode.
-        Controlled by ATLASSIAN_COOKIE_HARVEST (default on); set falsy to skip.
-        """
-        if not _env_truthy("ATLASSIAN_COOKIE_HARVEST", True):
-            return False
-        try:
-            # Imported lazily so a harvest-disabled or non-macOS environment never
-            # pays the import cost (and a missing optional dep can't break auth).
-            from cookie_autoauth import auto_harvest
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("auto-harvest unavailable: %s", exc)
-            return False
-        try:
-            res = auto_harvest(
-                self.service,
-                self.base_url,
-                storage_state_path=self.browser_config.storage_state,
-                user_agent=self.browser_config.user_agent,
-            )
-        except Exception as exc:  # noqa: BLE001 - harvest must never break auth
-            logger.debug("auto-harvest error for %s: %s", self.service, exc)
-            return False
-        if res.authenticated:
-            print(
-                f"[atlassian-browser-auth] Reused live {self.service} session from "
-                f"{res.browser}/{res.profile} ({res.cookie_count} cookies) — no login needed.",
-                file=sys.stderr,
-                flush=True,
-            )
-            return True
-        if res.attempts:
-            print(
-                f"[atlassian-browser-auth] No live {self.service} session in any browser "
-                f"({'; '.join(res.attempts)}).",
-                file=sys.stderr,
-                flush=True,
-            )
-        return False
 
     def request(self, method: str, url: str, *args: Any, **kwargs: Any) -> requests.Response:
         """Make a request, re-loading cookies once on an SSO redirect or 401.
 
         On a re-auth signal we NEVER open a browser. We reload the saved jar (a
-        separate `atlassian-cli import` may have refreshed it), retry, and if
-        still stale try harvesting a live session from another browser. If
-        nothing authenticates, raise AuthRequiredError so the caller can tell the
-        user to re-export cookies with the extension.
+        separate `atlassian-cli import` may have refreshed it) and retry once. If
+        it still doesn't authenticate, raise AuthRequiredError so the caller can
+        tell the user to re-export cookies with the extension.
         """
         retry_on_auth = kwargs.pop("_retry_on_auth", True)
         response = super().request(method, url, *args, **kwargs)
@@ -440,21 +437,9 @@ class BrowserCookieSession(requests.Session):
         response.close()
         with _LOGIN_LOCK:
             # Reload from disk; refresh_cookies raises AuthRequiredError if the
-            # jar is absent and nothing can be harvested.
+            # jar is absent.
             self.refresh_cookies()
             retest = super().request(method, url, *args, **kwargs)
-            if looks_like_sso_response(retest) or retest.status_code == 401:
-                # Disk jar is also stale. Try harvesting a fresh live session
-                # from another browser (bounded, no UI) before giving up — this
-                # is how we self-heal when the user re-authed in their normal
-                # browser.
-                retest.close()
-                if self._try_auto_harvest():
-                    storage_state = _load_storage_state(
-                        self.browser_config.storage_state
-                    )
-                    _apply_storage_state_cookies(self, storage_state, self.base_url)
-                    retest = super().request(method, url, *args, **kwargs)
         if not looks_like_sso_response(retest) and retest.status_code != 401:
             return retest
         retest.close()
@@ -471,7 +456,7 @@ def create_browser_session(
 
     ``allow_interactive`` is retained for API compatibility (the MCP server
     passes False); no code path opens a browser regardless. The session reads
-    saved/harvested cookies and raises AuthRequiredError on a cache miss.
+    the saved cookie jar and raises AuthRequiredError on a cache miss.
     """
     return BrowserCookieSession(
         service=service,

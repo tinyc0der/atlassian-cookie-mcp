@@ -15,9 +15,8 @@
 # Exit codes: 0 = all checked services GREEN; 1 = at least one RED.
 # Agent contract: a fast GREEN/RED check before Atlassian calls. If RED, re-auth
 # by exporting cookies with the browser extension and running
-# `atlassian-cli import <file>` (or `atlassian-cli login <svc>` to reuse a live
-# Arc/Brave session). The MCP server fails fast on a missing session — it never
-# hangs — but a GREEN check still saves a round-trip.
+# `atlassian-cli import <file>`. The MCP server fails fast on a missing session —
+# it never hangs — but a GREEN check still saves a round-trip.
 
 set -uo pipefail
 
@@ -86,21 +85,6 @@ PY
       return 0
     fi
   done <<< "$states"
-
-  # Saved jars are missing or stale. Before declaring RED, try harvesting a LIVE
-  # session from any installed browser (bounded, opens no window). This is what
-  # makes preflight self-healing: if the user's normal browser (Arc/Chrome/...)
-  # has a live session, it is reused with no interactive login. Opt out with
-  # ATLASSIAN_COOKIE_HARVEST=0.
-  if [[ "${ATLASSIAN_COOKIE_HARVEST:-1}" != "0" && -f "$DIR/cookie_autoauth.py" ]]; then
-    local py harvested
-    py="$DIR/.venv-atlassian-browser/bin/python3"; [[ -x "$py" ]] || py="python3"
-    harvested="$("$py" "$DIR/cookie_autoauth.py" "$svc" 2>/dev/null | grep -E '\-> HTTP 200' | head -1)"
-    if [[ -n "$harvested" ]]; then
-      echo "GREEN $svc  (harvested live session from ${harvested%%:*})"
-      return 0
-    fi
-  fi
 
   if [[ "$had_cookies" == "0" ]]; then
     echo "RED  $svc  (no $host cookies; no live browser session) — export via the browser extension, then: atlassian-cli import <file>"

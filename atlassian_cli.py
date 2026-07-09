@@ -8,9 +8,8 @@ requests.Session, so there is no MCP transport or upstream mcp-atlassian layer
 to break.
 
 Auth: reuses cookies captured by the Chrome extension (see chrome-extension/)
-via `import`, or auto-harvested from a live browser. If cookies are missing or
-expired, export them with the extension and run `import`, then retry. No browser
-is ever opened by this tool.
+via `import`. If cookies are missing or expired, export them with the extension
+and run `import`, then retry. No browser is ever opened by this tool.
 
 Env (required, no defaults — same as the rest of this project):
   JIRA_URL         e.g. <your-jira-host>
@@ -18,7 +17,6 @@ Env (required, no defaults — same as the rest of this project):
 
 Examples:
   atlassian-cli import ~/Downloads/atlassian-cookies.json
-  atlassian-cli login jira
   atlassian-cli jira get PROJ-123 --comments
   atlassian-cli jira search 'project = PROJ AND status = "In Progress"' --max 10
   atlassian-cli confluence get 123456789 --markdown -o page.md
@@ -41,6 +39,8 @@ from atlassian_browser_auth import (  # noqa: E402
     BrowserAuthConfig,
     _cookie_matches_base_url,
     create_browser_session,
+    probe_live,
+    write_storage_state,
 )
 
 
@@ -91,7 +91,8 @@ def _get_json(service: str, path: str, params: dict | None = None) -> Any:
         else:
             _eprint(
                 f"(response {len(r.content)} bytes, content-type={ctype}; "
-                f"if this looks like an SSO page, re-run: atlassian-cli login {service})"
+                "if this looks like an SSO page, re-export cookies with the "
+                "extension and run: atlassian-cli import <file>)"
             )
         sys.exit(2)
     return r.json()
@@ -123,44 +124,6 @@ def _html_to_markdown(html: str) -> str:
 
 
 # ---- commands -------------------------------------------------------------
-def cmd_login(args: argparse.Namespace) -> None:
-    """Try to reuse a live session from a readable browser; else explain export.
-
-    No browser is opened. Modern Chrome cookies are app-bound and cannot be read
-    off disk, so if no other browser (Arc/Brave/...) has a readable live session
-    this points the user at the extension + `import` flow.
-    """
-    from cookie_autoauth import auto_harvest
-
-    svc = args.service
-    cfg = BrowserAuthConfig.from_env(svc)
-    base = cfg.service_base(svc)
-    res = auto_harvest(
-        svc, base, storage_state_path=cfg.storage_state, user_agent=cfg.user_agent
-    )
-    for attempt in res.attempts:
-        _eprint(f"  {attempt}")
-    if res.authenticated:
-        print(json.dumps({
-            "status": "ok",
-            "service": svc,
-            "source": f"{res.browser}/{res.profile}",
-            "cookie_count": res.cookie_count,
-            "storage_state": res.storage_state_path,
-        }, indent=2))
-        return
-
-    ext = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome-extension")
-    _eprint(
-        "\nNo live session found in a readable browser (modern Chrome cookies are "
-        "app-bound and can't be read off disk).\n"
-        f"Load the extension in {ext} (chrome://extensions -> Developer mode -> "
-        "Load unpacked), click Export, then run:\n"
-        "  atlassian-cli import ~/Downloads/atlassian-cookies.json"
-    )
-    sys.exit(3)
-
-
 def cmd_import(args: argparse.Namespace) -> None:
     """Load cookies exported by the browser extension into the per-service jars.
 
@@ -168,8 +131,6 @@ def cmd_import(args: argparse.Namespace) -> None:
     and writes each service's jar, then probes the REST API so the user gets
     immediate confirmation the imported session is live.
     """
-    from cookie_autoauth import _probe_live, write_storage_state
-
     try:
         with open(args.file) as fh:
             data = json.load(fh)
@@ -193,7 +154,7 @@ def cmd_import(args: argparse.Namespace) -> None:
             continue
         any_matched = True
         write_storage_state(matched, cfg.storage_state)
-        status = _probe_live(base, svc, matched, cfg.user_agent)
+        status = probe_live(base, svc, matched, cfg.user_agent)
         if status == 200:
             any_live = True
             print(
@@ -295,10 +256,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="atlassian-cli", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-
-    pl = sub.add_parser("login", help="reuse a live browser session, or explain export")
-    pl.add_argument("service", choices=["jira", "confluence"], default="jira", nargs="?")
-    pl.set_defaults(func=cmd_login)
 
     pi = sub.add_parser("import", help="import cookies exported by the browser extension")
     pi.add_argument("file", help="path to atlassian-cookies.json from the extension")
