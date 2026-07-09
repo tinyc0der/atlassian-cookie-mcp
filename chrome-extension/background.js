@@ -1,8 +1,10 @@
 // Background service worker: opt-in auto-sync on session cookie changes.
 //
-// When autoSync is enabled (popup toggle), listens to chrome.cookies.onChanged,
-// debounces, and pushes cookies for allowed Jira/Confluence hosts to the native
-// host. Default is off. Manual Sync in the popup is unchanged.
+// When autoSync is enabled (popup toggle), listens to chrome.cookies.onChanged
+// for *session/identity* cookies only (tenant.session.token, JSESSIONID, …) —
+// that is when the jar must be refreshed. On trigger it still pushes the *full*
+// product-domain cookie set (browser-like), not just the session cookie.
+// Default is off. Manual Sync in the popup is unchanged.
 
 import {
   AUTO_SYNC_DEBOUNCE_MS,

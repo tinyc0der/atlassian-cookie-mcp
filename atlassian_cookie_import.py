@@ -82,6 +82,7 @@ def import_cookies(
             result.error = str(exc)
             return result
         base = cfg.service_base(svc)
+        # All cookies for the product host (browser-like), not session-only.
         matched = [c for c in cookies if _cookie_matches_base_url(c, base)]
         if not matched:
             result.services.append(

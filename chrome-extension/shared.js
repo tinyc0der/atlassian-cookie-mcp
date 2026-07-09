@@ -9,8 +9,12 @@ export const AUTO_SYNC_KEY = "autoSync";
 export const AUTO_SYNC_DEBOUNCE_MS = 3000;
 
 /**
- * Cookie names that warrant a jar refresh (login / session rotation).
- * Ignore churn like XSRF tokens and load-balancer cookies.
+ * Cookie names that mean "re-capture the full domain jar now".
+ *
+ * Storage always saves *all* cookies for the product host (browser simulation).
+ * Auto-sync only *triggers* on these names (e.g. tenant.session.token) so XSRF /
+ * ALB / analytics churn does not spam the native host. When they fire, the
+ * full cookie set for the host is still written.
  */
 const SESSION_COOKIE_NAMES = new Set([
   "tenant.session.token",
@@ -137,6 +141,10 @@ export async function setAutoSyncEnabled(enabled) {
 /**
  * Collect cookies for a product host (url filter + domain filter).
  * Requires host permission (declared or optional) for that origin.
+ *
+ * Saves *all* cookies Chrome would attach to that origin (session, XSRF,
+ * sticky, analytics on the product domain) so the local jar can simulate a
+ * browser. Session-name checks are only for auto-sync *triggers*, not here.
  */
 export async function collectCookiesForHost(pageHost) {
   const host = normalizeHost(pageHost);

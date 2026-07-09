@@ -233,12 +233,52 @@ def _cookie_matches_base_url(cookie: dict[str, Any], base_url: str) -> bool:
     return hostname == domain or hostname.endswith(f".{domain}")
 
 
+# Session/identity cookie names that mean "login or session rotation happened".
+# Used only as a refresh signal (e.g. extension auto-sync). Jars still store
+# *all* cookies for product domains so requests look like a real browser.
+# Keep in sync with chrome-extension/shared.js SESSION_COOKIE_NAMES.
+_SESSION_COOKIE_NAMES = frozenset(
+    {
+        "tenant.session.token",
+        "cloud.session.token",
+        "jsessionid",
+        "seraph.rememberme.cookie",
+        "studio.crowd.tokenkey",
+        "crowd.token_key",
+        "atlassian.account.session",
+        "atl.account.session",
+    }
+)
+
+
+def is_session_cookie_name(name: str | None) -> bool:
+    """Return True if *name* is an Atlassian session/identity cookie.
+
+    This is a *refresh trigger* helper (when these change, re-capture the full
+    domain jar). It does **not** mean other cookies are dropped from storage —
+    import/apply keep every cookie for the product host to mimic the browser.
+    """
+    if not name:
+        return False
+    n = str(name).lower()
+    if n in _SESSION_COOKIE_NAMES:
+        return True
+    # Server/DC variants: session-ish names containing token or jsession.
+    if "session" in n and ("token" in n or "jsession" in n):
+        return True
+    return False
+
+
 def _apply_storage_state_cookies(
     session: requests.Session,
     storage_state: dict[str, Any],
     base_url: str,
 ) -> None:
-    """Apply cookies from storage state to a requests session."""
+    """Apply cookies from storage state to a requests session.
+
+    Loads every non-expired cookie whose domain matches *base_url* — the same
+    set a browser would send to that origin (session, XSRF, sticky, etc.).
+    """
     session.cookies.clear()
     now = time.time()
     for cookie in storage_state.get("cookies", []):

@@ -72,7 +72,8 @@ with separate hosts, open each product and Sync once.
 
 When enabled, a background service worker listens for `chrome.cookies.onChanged`
 on **session** cookies only (e.g. `tenant.session.token`, `JSESSIONID` — not XSRF
-churn), debounces ~3s, and pushes cookies to the native host.
+churn). That change is the *signal* to refresh. On fire it still syncs **all**
+cookies for the product host (same set the browser would send), debounced ~3s.
 
 - **Default: off**
 - Chrome must stay running with the extension loaded

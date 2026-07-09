@@ -4,8 +4,8 @@ These prove the import command's decision logic without any network: we set
 JIRA_URL/CONFLUENCE_URL to synthetic hosts, redirect the cookie jars into a temp
 dir via ATLASSIAN_STORAGE_STATE, and stub the liveness probe. Coverage:
 
-  - cookies split into the correct per-service jar by domain (incl. parent-domain
-    cookies shared by both, and IdP cookies routed to neither)
+  - cookies split into the correct per-service jar by domain (all product-host
+    cookies kept to mimic the browser; IdP cookies routed to neither)
   - session cookies (expires:-1) survive into the jar unchanged
   - --service limits the write to a single jar
   - malformed JSON / missing cookies list are rejected (exit 2)
@@ -55,19 +55,23 @@ def test_import_splits_by_domain(env, tmp_path):
     export = _write_export(tmp_path, [
         {"name": "JSESSIONID", "value": "j", "domain": "jira.example.com",
          "path": "/", "secure": True, "httpOnly": True, "expires": -1},
+        # Parent-domain cookie shared by both product hosts — kept (browser-like).
         {"name": "shared", "value": "s", "domain": ".example.com",
          "path": "/", "secure": True, "httpOnly": False, "expires": 1900000000},
-        {"name": "confSess", "value": "c", "domain": "confluence.example.com",
+        {"name": "JSESSIONID", "value": "c", "domain": "confluence.example.com",
          "path": "/", "secure": True, "httpOnly": True, "expires": -1},
+        {"name": "atlassian.xsrf.token", "value": "xsrf", "domain": "jira.example.com",
+         "path": "/", "secure": True, "httpOnly": False, "expires": -1},
         {"name": "idp", "value": "x", "domain": "okta.com",
          "path": "/", "secure": True, "httpOnly": True, "expires": -1},
     ])
 
     cli.cmd_import(SimpleNamespace(file=str(export), service=None))
 
-    assert _names(_jar(tmp_path, "jira")) == {"JSESSIONID", "shared"}
-    assert _names(_jar(tmp_path, "confluence")) == {"confSess", "shared"}
-    # The IdP cookie belongs to neither service jar.
+    # Full product-domain cookie set (not session-only).
+    assert _names(_jar(tmp_path, "jira")) == {"JSESSIONID", "shared", "atlassian.xsrf.token"}
+    assert _names(_jar(tmp_path, "confluence")) == {"JSESSIONID", "shared"}
+    # IdP cookies are off-host — neither jar.
     assert "idp" not in _names(_jar(tmp_path, "jira"))
     assert "idp" not in _names(_jar(tmp_path, "confluence"))
     # Export is deleted after jars are written (treat like a password).
@@ -88,11 +92,32 @@ def test_session_cookie_expires_minus_one_survives(env, tmp_path):
 def test_service_filter_only_writes_that_jar(env, tmp_path):
     export = _write_export(tmp_path, [
         {"name": "JSESSIONID", "value": "j", "domain": "jira.example.com", "path": "/", "expires": -1},
-        {"name": "confSess", "value": "c", "domain": "confluence.example.com", "path": "/", "expires": -1},
+        {"name": "JSESSIONID", "value": "c", "domain": "confluence.example.com", "path": "/", "expires": -1},
     ])
     cli.cmd_import(SimpleNamespace(file=str(export), service="jira"))
     assert (tmp_path / "state-jira.json").exists()
     assert not (tmp_path / "state-confluence.json").exists()
+    assert not export.exists()
+
+
+def test_import_keeps_all_product_domain_cookies(env, tmp_path):
+    """Browser-like: all cookies for the product host are stored, not session-only."""
+    export = _write_export(tmp_path, [
+        {"name": "tenant.session.token", "value": "sess", "domain": "jira.example.com",
+         "path": "/", "secure": True, "httpOnly": True, "expires": 1900000000},
+        {"name": "AWSALB", "value": "lb", "domain": "jira.example.com", "path": "/", "expires": 1900000000},
+        {"name": "atlassian.xsrf.token", "value": "x", "domain": "jira.example.com", "path": "/", "expires": -1},
+        {"name": "__cuid", "value": "a", "domain": ".example.com", "path": "/", "expires": 1900000000},
+        {"name": "atl-bsc-show-banner", "value": "1", "domain": "jira.example.com", "path": "/", "expires": -1},
+    ])
+    cli.cmd_import(SimpleNamespace(file=str(export), service="jira"))
+    assert _names(_jar(tmp_path, "jira")) == {
+        "tenant.session.token",
+        "AWSALB",
+        "atlassian.xsrf.token",
+        "__cuid",
+        "atl-bsc-show-banner",
+    }
     assert not export.exists()
 
 
