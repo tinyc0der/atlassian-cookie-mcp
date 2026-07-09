@@ -7,7 +7,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_PY="$SCRIPT_DIR/.venv-atlassian-browser/bin/python"
+VENV_PY="$SCRIPT_DIR/.venv/bin/python"
 
 # JIRA_URL and CONFLUENCE_URL must be exported by the caller (shell or .mcp.json);
 # the CLI requires them and will error with guidance if unset.

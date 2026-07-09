@@ -2,9 +2,17 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="${ROOT_DIR}/.venv-atlassian-browser"
+VENV_DIR="${ROOT_DIR}/.venv"
 PYTHON_BIN="${VENV_DIR}/bin/python"
 MCP_BIN="${VENV_DIR}/bin/atlassian-browser-mcp"
+ENV_FILE="${ATLASSIAN_BROWSER_MCP_ENV:-${ROOT_DIR}/.env}"
+
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+  set +a
+fi
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "uv is required but not installed." >&2
